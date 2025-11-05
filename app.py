@@ -1,37 +1,51 @@
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import requests, os
+import requests, os, datetime
 
-app = FastAPI(title="Kommo ↔ ChatGPT Middleware")
+app = FastAPI(title="Kommo ↔ ChatGPT Middleware (Secure Edition)")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# Variáveis de ambiente
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 KOMMO_TOKEN = os.getenv("KOMMO_TOKEN")
-KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN")  # ex.: https://seusubdominio.kommo.com
+KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN")
+
+# CORS restrito — permite apenas o domínio do Kommo
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[KOMMO_DOMAIN] if KOMMO_DOMAIN else ["*"],
+    allow_credentials=True,
+    allow_methods=["POST", "GET"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "Middleware ativo", "kommo_domain": KOMMO_DOMAIN}
+    return {"status": "ok", "message": "Middleware ativo e seguro", "kommo_domain": KOMMO_DOMAIN}
 
 @app.get("/health")
 def health():
     ok = bool(OPENAI_API_KEY and KOMMO_TOKEN and KOMMO_DOMAIN)
-    return {"ok": ok}
+    return {"ok": ok, "timestamp": datetime.datetime.now().isoformat()}
+
+@app.get("/ping")
+def ping():
+    return {"status": "alive", "timestamp": datetime.datetime.now().isoformat()}
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
+    # Verifica o token de autorização
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or auth_header != f"Bearer {KOMMO_TOKEN}":
+        raise HTTPException(status_code=401, detail="Acesso não autorizado: token inválido")
+
     try:
         payload = await request.json()
     except Exception:
-        payload = {}
+        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+
+    # Log simples de auditoria
+    print(f"[{datetime.datetime.now()}] Payload recebido: {payload}")
 
     message = (
         payload.get("message", {}).get("text")
@@ -43,7 +57,7 @@ async def kommo_webhook(request: Request):
     lead_id = lead.get("id") or payload.get("lead_id")
 
     if not message:
-        return {"status": "ignored", "reason": "no message in payload", "payload_keys": list(payload.keys())}
+        return {"status": "ignored", "reason": "sem mensagem detectada", "payload_keys": list(payload.keys())}
 
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     openai_body = {
@@ -53,9 +67,8 @@ async def kommo_webhook(request: Request):
                 "role": "system",
                 "content": (
                     "Você é o assistente de vendas do Lucas Mendes (TecBrilho). "
-                    "Responda de forma cordial e objetiva, colete dados do cliente "
-                    "(nome, telefone, serviço de interesse), registre próximos passos "
-                    "e ofereça agendamento. Se houver objeções, contorne com empatia."
+                    "Responda de forma cordial, profissional e empática. "
+                    "Colete nome, telefone e serviço de interesse; ofereça agendamento e contorne objeções com gentileza."
                 ),
             },
             {"role": "user", "content": message},
@@ -84,6 +97,6 @@ async def kommo_webhook(request: Request):
         )
         r.raise_for_status()
     except Exception as e:
-        return {"status": "error", "step": "kommo_note", "error": str(e), "ai_response": resposta}
+        return {"status": "erro", "etapa": "kommo_note", "erro": str(e), "resposta": resposta}
 
-    return {"status": "ok", "lead_id": lead_id, "ai_response": resposta}
+    return {"status": "ok", "lead_id": lead_id, "resposta": resposta}
