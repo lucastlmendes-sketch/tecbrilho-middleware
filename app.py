@@ -77,10 +77,26 @@ async def kommo_webhook(request: Request):
 
     try:
         ai = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=openai_body,
-            timeout=30
+            # Novo trecho de integração com o agente Zidane
+ASSISTANT_ID = os.getenv("ZIDANE_ASSISTANT_ID")
+
+try:
+    ai = requests.post(
+        f"https://api.openai.com/v1/assistants/{ASSISTANT_ID}/responses",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "input": [{"role": "user", "content": message}],
+        },
+        timeout=30,
+    )
+    ai.raise_for_status()
+    resposta = ai.json()["output"][0]["content"][0]["text"]
+except Exception as e:
+    resposta = f"Erro ao gerar resposta: {e}"
+
         )
         ai.raise_for_status()
         resposta = ai.json()["choices"][0]["message"]["content"]
