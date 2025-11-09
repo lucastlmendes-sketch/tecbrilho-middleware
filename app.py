@@ -1,192 +1,323 @@
 import os
 import json
 import datetime
+from typing import Optional, Tuple, Dict, Any
+
 import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from openai import OpenAI
 
-# ---------------------------------------------------------
+# =========================================
 # Configurações básicas
-# ---------------------------------------------------------
+# =========================================
+
 app = FastAPI()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")  # Erika
-KOMMO_TOKEN = os.getenv("KOMMO_TOKEN")                  # token da API Kommo
-KOMMO_DOMAIN = os.getenv("KOMMO_DOMAIN")                # ex: "https://tecbrilho.kommo.com"
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+KOMMO_DOMAIN = (os.getenv("KOMMO_DOMAIN") or "").rstrip("/")
+KOMMO_TOKEN = os.getenv("KOMMO_TOKEN") or ""
+AUTHORIZED_SUBDOMAIN = os.getenv("AUTHORIZED_SUBDOMAIN") or ""
+ERIKA_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID") or ""
 
-
-# ---------------------------------------------------------
-# Função: chamar a Erika na OpenAI (Assistants)
-# ---------------------------------------------------------
-def call_openai_erika(user_message: str) -> str:
-    """
-    Envia a mensagem do cliente para a Erika (Assistente da OpenAI)
-    e devolve apenas o texto da resposta.
-    """
-
-    if not OPENAI_ASSISTANT_ID:
-        # fallback: se por algum motivo não tiver ID configurado
-        # evita quebrar a aplicação
-        return (
-            "Oi! Aqui é a Erika da TecBrilho. "
-            "No momento estou com uma indisponibilidade técnica, "
-            "mas já já tudo volta ao normal. 😊"
-        )
-
-    try:
-        # Cria uma resposta usando o Assistente configurado (Erika)
-        # Aqui usamos a API de Responses com um assistant_id já treinado no painel.
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            assistant_id=OPENAI_ASSISTANT_ID,
-            input=[
-                {
-                    "role": "user",
-                    "content": user_message,
-                }
-            ],
-        )
-
-        # Extrai o texto final
-        for item in response.output:
-            if item.type == "message":
-                for content_part in item.message.content:
-                    if content_part.type == "output_text":
-                        return content_part.output_text.text
-
-        # Fallback caso algo diferente aconteça
-        return (
-            "Oi! Sou a Erika da TecBrilho. "
-            "Recebi sua mensagem, mas tive um pequeno problema para gerar a resposta completa. "
-            "Pode me mandar de novo ou explicar um pouco mais, por favor? 😊"
-        )
-
-    except Exception as e:
-        print(f"[ERRO OPENAI] {e}")
-        return (
-            "Tive um problema técnico ao processar sua mensagem agora. "
-            "Você pode tentar novamente em alguns instantes, por favor? 🙏"
-        )
+ACTION_START = "### ERIKA_ACTION"
+ACTION_END = "### END_ERIKA_ACTION"
 
 
-# ---------------------------------------------------------
-# Rotas básicas (teste / health)
-# ---------------------------------------------------------
+def log(*args):
+    """Log simples com timestamp (aparece nos logs do Render)."""
+    print(datetime.datetime.now().isoformat(), "-", *args, flush=True)
+
+
+# =========================================
+# Rotas básicas (Render / Healthcheck)
+# =========================================
+
 @app.get("/")
 async def root():
-    return PlainTextResponse("Kommo ⇆ OpenAI middleware is running.")
+    return {"status": "ok", "message": "kommo-middleware online"}
 
 
 @app.get("/health")
 async def health():
-    return PlainTextResponse("ok")
+    return {"status": "ok"}
 
 
-# ---------------------------------------------------------
-# Webhook do Kommo
-# ---------------------------------------------------------
-@app.post("/kommo-webhook")
-async def kommo_webhook(request: Request):
+# =========================================
+# Helpers para ERIKA_ACTION
+# =========================================
+
+def split_erika_output(full_text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
     """
-    Endpoint que recebe os eventos do Kommo.
-    - Lê o payload (se houver JSON válido)
-    - Extrai a mensagem de texto do cliente
-    - Chama a Erika na OpenAI
-    - Cria uma nota no lead (se houver lead_id)
-    - Devolve JSON simples pro Kommo
+    Separa o texto visível ao cliente do bloco técnico ERIKA_ACTION.
+    Retorna (texto_visivel, action_dict_ou_None).
     """
+    if not full_text:
+        return "", None
 
-    # 1) Ler o corpo cru primeiro, para evitar JSONDecodeError
-    body_bytes = await request.body()
-    if not body_bytes:
-        # Kommo às vezes pode mandar requisições sem corpo (pings/testes)
-        print("[WEBHOOK] Corpo vazio recebido, ignorando.")
-        return JSONResponse(
-            {"status": "ignored", "reason": "empty body"},
-            status_code=200,
-        )
+    start = full_text.rfind(ACTION_START)
+    if start == -1:
+        # Nenhum bloco encontrado
+        return full_text.strip(), None
+
+    visible_text = full_text[:start].rstrip()
+
+    after = full_text[start + len(ACTION_START):]
+    end = after.rfind(ACTION_END)
+    if end != -1:
+        action_raw = after[:end]
+    else:
+        action_raw = after
+
+    action_raw = action_raw.strip()
+
+    if not action_raw:
+        return visible_text, None
 
     try:
-        payload = json.loads(body_bytes)
+        action_data = json.loads(action_raw)
     except json.JSONDecodeError as e:
-        print(f"[WEBHOOK] JSON inválido recebido: {e} | body={body_bytes!r}")
-        return JSONResponse(
-            {"status": "ignored", "reason": "invalid json"},
-            status_code=200,
-        )
+        log("Erro ao decodificar ERIKA_ACTION:", repr(e), "conteúdo:", action_raw[:500])
+        action_data = None
 
-    print(f"[WEBHOOK] Payload recebido às {datetime.datetime.now()}: {payload}")
+    return visible_text, action_data
 
-    # 2) Extrair mensagem de texto (vários formatos possíveis do Kommo)
-    message = (
-        payload.get("message", {}).get("text")
-        or payload.get("text")
-        or payload.get("last_message", {}).get("text")
+
+# =========================================
+# Helpers para Kommo
+# =========================================
+
+def add_kommo_note(lead_id: Optional[int], text: str):
+    """Cria uma nota 'common' no lead do Kommo."""
+    if not lead_id or not KOMMO_DOMAIN or not KOMMO_TOKEN or not text:
+        return
+
+    url = f"{KOMMO_DOMAIN}/api/v4/leads/notes"
+    payload = [
+        {
+            "entity_id": int(lead_id),
+            "note_type": "common",
+            "params": {
+                "text": text
+            }
+        }
+    ]
+    headers = {"Authorization": f"Bearer {KOMMO_TOKEN}"}
+
+    log("Enviando nota para Kommo:", url, "lead_id=", lead_id)
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+
+
+# Mapeamento de nome da etapa -> variável de ambiente com o status_id do Kommo
+STAGE_ENV_MAP = {
+    "Leads Recebidos": "KOMMO_STATUS_LEADS_RECEBIDOS",
+    "Contato em Andamento": "KOMMO_STATUS_CONTATO_EM_ANDAMENTO",
+    "Serviço Vendido": "KOMMO_STATUS_SERVICO_VENDIDO",
+    "Agendamento Pendente": "KOMMO_STATUS_AGENDAMENTO_PENDENTE",
+    "Agendamentos Confirmados": "KOMMO_STATUS_AGENDAMENTOS_CONFIRMADOS",
+    "Cliente Presente": "KOMMO_STATUS_CLIENTE_PRESENTE",
+    "Cliente Ausente": "KOMMO_STATUS_CLIENTE_AUSENTE",
+    "Reengajar": "KOMMO_STATUS_REENGAJAR",
+    "Solicitar FeedBack": "KOMMO_STATUS_SOLICITAR_FEEDBACK",
+    "Solicitar Avaliação Google": "KOMMO_STATUS_SOLICITAR_AVALIACAO_GOOGLE",
+    "Avaliação 5 Estrelas": "KOMMO_STATUS_AVALIACAO_5_ESTRELAS",
+    "Cliente Insatisfeito": "KOMMO_STATUS_CLIENTE_INSATISFEITO",
+    "Vagas de Emprego": "KOMMO_STATUS_VAGAS_DE_EMPREGO",
+    "Solicitar Atendimento Humano": "KOMMO_STATUS_SOLICITAR_ATENDIMENTO_HUMANO",
+}
+
+
+def update_lead_stage(lead_id: Optional[int], stage_name: Optional[str]):
+    """Atualiza a etapa/status do lead no Kommo, se IDs estiverem configurados."""
+    if not lead_id or not stage_name:
+        return
+
+    env_name = STAGE_ENV_MAP.get(stage_name)
+    if not env_name:
+        log("Nenhum env configurado para etapa:", stage_name)
+        return
+
+    status_id = os.getenv(env_name)
+    if not status_id:
+        log("Variável de ambiente não definida para", stage_name, "=>", env_name)
+        return
+
+    if not KOMMO_DOMAIN or not KOMMO_TOKEN:
+        log("KOMMO_DOMAIN ou KOMMO_TOKEN não configurados, não foi possível mover o lead.")
+        return
+
+    url = f"{KOMMO_DOMAIN}/api/v4/leads/{int(lead_id)}"
+    payload = {"status_id": int(status_id)}
+    headers = {"Authorization": f"Bearer {KOMMO_TOKEN}"}
+
+    log(f"Atualizando lead {lead_id} para etapa '{stage_name}' (status_id={status_id})")
+    r = requests.patch(url, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+
+
+# =========================================
+# Helper para chamar a Erika (Assistants API)
+# =========================================
+
+def call_openai_erika(user_message: str,
+                      lead_id: Optional[int] = None,
+                      phone: Optional[str] = None) -> str:
+    """
+    Chama a Erika via Assistants API usando o ID configurado em OPENAI_ASSISTANT_ID.
+    Retorna o texto bruto da resposta da assistente (incluindo o bloco ERIKA_ACTION).
+    """
+    if not ERIKA_ASSISTANT_ID:
+        raise RuntimeError("OPENAI_ASSISTANT_ID (ID da Erika) não configurado nas variáveis de ambiente.")
+
+    meta_parts = []
+    if lead_id:
+        meta_parts.append(f"lead_id={lead_id}")
+    if phone:
+        meta_parts.append(f"telefone={phone}")
+
+    meta_text = ""
+    if meta_parts:
+        meta_text = "[CONTEXTO KOMMO] " + " | ".join(meta_parts)
+
+    messages = [{"role": "user", "content": user_message}]
+    if meta_text:
+        messages.append({"role": "user", "content": meta_text})
+
+    log("Criando thread para Erika - lead_id:", lead_id, "phone:", phone)
+
+    thread = client.beta.threads.create(messages=messages)
+
+    run = client.beta.threads.runs.create_and_poll(
+        thread_id=thread.id,
+        assistant_id=ERIKA_ASSISTANT_ID,
+    )
+
+    log("Status do run da Erika:", run.status)
+
+    if run.status != "completed":
+        raise RuntimeError(f"Execução da Erika não completou corretamente. status={run.status}")
+
+    msgs = client.beta.threads.messages.list(thread_id=thread.id, limit=10)
+
+    # Pega a última mensagem da assistente com conteúdo de texto
+    for msg in msgs.data:
+        if msg.role == "assistant":
+            texts = []
+            for part in msg.content:
+                if part.type == "text":
+                    texts.append(part.text.value)
+            if texts:
+                resposta = "\n\n".join(texts)
+                log("Resposta bruta da Erika (primeiros 400 chars):", resposta[:400])
+                return resposta
+
+    log("Nenhuma mensagem de assistente encontrada na thread da Erika.")
+    return ""
+
+
+# =========================================
+# Webhook Kommo
+# =========================================
+
+@app.post("/kommo-webhook")
+async def kommo_webhook(request: Request):
+    # Tenta ler o JSON do Kommo
+    try:
+        payload = await request.json()
+    except Exception as e:
+        log("Erro ao ler JSON do webhook:", repr(e))
+        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+
+    log("Webhook recebido (primeiros 1000 chars):", json.dumps(payload)[:1000])
+
+    # Validação opcional de subdomínio
+    if AUTHORIZED_SUBDOMAIN:
+        account = payload.get("account") or {}
+        subdomain = None
+        if isinstance(account, dict):
+            subdomain = account.get("subdomain") or account.get("name")
+        if subdomain and subdomain != AUTHORIZED_SUBDOMAIN:
+            log("Subdomínio não autorizado:", subdomain)
+            raise HTTPException(status_code=401, detail=f"Subdomínio não autorizado: {subdomain}")
+
+    data = payload.get("data") or payload
+
+    # Extração da mensagem de texto
+    message_text = (
+        (data.get("message") or {}).get("text")
+        or (data.get("conversation") or {}).get("last_message", {}).get("text")
+        or (data.get("last_message") or {}).get("text")
+        or data.get("text")
         or ""
     )
 
-    # 3) Extrair informações de lead (se vier)
-    lead = payload.get("lead") or {}
-    lead_id = lead.get("id") or payload.get("lead_id")
-
-    if not message:
-        # Não há texto pra responder → não chama a IA
-        print("[WEBHOOK] Payload sem campo de mensagem de texto, ignorando.")
-        return JSONResponse(
-            {
-                "status": "ignored",
-                "reason": "sem mensagem",
-                "payload_keys": list(payload.keys()),
-            },
-            status_code=200,
-        )
-
-    # 4) Chamar a Erika na OpenAI
-    ai_response = call_openai_erika(message)
-    print(f"[ERIKA] Resposta gerada: {ai_response}")
-
-    # 5) Criar nota no lead no Kommo (se tivermos lead_id + token + domínio)
-    kommo_note_status = "skipped"
-    error_msg = ""
-
-    if lead_id and KOMMO_TOKEN and KOMMO_DOMAIN:
-        try:
-            note_data = {
-                "note_type": "common",
-                "params": {"text": f"🧠 Erika (IA TecBrilho): {ai_response}"},
-            }
-
-            r = requests.post(
-                f"{KOMMO_DOMAIN}/api/v4/leads/{lead_id}/notes",
-                headers={"Authorization": f"Bearer {KOMMO_TOKEN}"},
-                json=note_data,
-                timeout=30,
-            )
-            r.raise_for_status()
-            kommo_note_status = "ok"
-            print(f"[KOMMO] Nota criada com sucesso no lead {lead_id}.")
-        except Exception as e:
-            kommo_note_status = "failed"
-            error_msg = str(e)
-            print(f"[ERRO KOMMO] Falha ao criar nota no lead {lead_id}: {e}")
-
-    else:
-        print(
-            "[KOMMO] Nota não enviada: faltando lead_id ou variáveis KOMMO_TOKEN/KOMMO_DOMAIN."
-        )
-
-    # 6) Devolver resposta JSON (Kommo não usa o texto, mas é útil pra debug)
-    return JSONResponse(
-        {
-            "status": "ok",
-            "lead_id": lead_id,
-            "ai_response": ai_response,
-            "kommo_note": kommo_note_status,
-            "error": error_msg,
-        },
-        status_code=200,
+    # Extração do lead_id
+    lead = data.get("lead") or {}
+    lead_id = (
+        lead.get("id")
+        or data.get("lead_id")
+        or (data.get("conversation") or {}).get("lead_id")
     )
+
+    # Extração de telefone (se vier no payload)
+    phone = None
+    contact = data.get("contact") or {}
+    if isinstance(contact, dict):
+        phones = contact.get("phones") or []
+        if isinstance(phones, list) and phones:
+            first = phones[0]
+            if isinstance(first, dict):
+                phone = first.get("value") or first.get("phone")
+            elif isinstance(first, str):
+                phone = first
+
+    if not str(message_text).strip():
+        log("Payload sem texto de mensagem. Ignorando.")
+        return {
+            "status": "ignored",
+            "reason": "sem mensagem",
+            "payload_keys": list(payload.keys()),
+        }
+
+    # Chama a Erika via Assistants API
+    try:
+        ai_full = call_openai_erika(message_text, lead_id=lead_id, phone=phone)
+    except Exception as e:
+        log("Erro ao chamar Erika:", repr(e))
+        raise HTTPException(status_code=500, detail="Erro ao processar resposta da Erika")
+
+    # Separa texto para o cliente e bloco ERIKA_ACTION
+    visible_text, action = split_erika_output(ai_full)
+
+    reply_text = (
+        visible_text.strip()
+        if visible_text and visible_text.strip()
+        else "Oi! Sou a Erika, da TecBrilho. Como posso te ajudar hoje?"
+    )
+
+    # Cria notas e tenta mover etapa, se possível
+    if lead_id:
+        try:
+            # Nota com a resposta completa da Erika
+            add_kommo_note(lead_id, f"Erika 🧠:\n{reply_text}")
+
+            if action and isinstance(action, dict):
+                summary = action.get("summary_note")
+                if summary:
+                    add_kommo_note(lead_id, f"ERIKA_ACTION: {summary}")
+
+                stage = action.get("kommo_suggested_stage")
+                if stage:
+                    update_lead_stage(lead_id, stage)
+        except Exception as e:
+            # Não quebra a resposta para o Kommo se der erro na nota/movimentação
+            log("Erro ao registrar nota ou atualizar estágio no Kommo:", repr(e))
+
+    return {
+        "status": "ok",
+        "lead_id": lead_id,
+        "ai_response": reply_text,
+        "erika_action": action,
+    }
