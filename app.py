@@ -101,15 +101,14 @@ def add_kommo_note(lead_id: Optional[int], text: str):
         return
 
     url = f"{KOMMO_DOMAIN}/api/v4/leads/notes"
-    payload = [
-        {
-            "entity_id": int(lead_id),
-            "note_type": "common",
-            "params": {
-                "text": text
-            }
-        }
-    ]
+   payload = {
+    "entity_id": int(lead_id),
+    "note_type": "common",
+    "params": {
+        "text": text
+    }
+}
+
     headers = {"Authorization": f"Bearer {KOMMO_TOKEN}"}
 
     try:
