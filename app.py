@@ -166,7 +166,7 @@ def update_lead_stage(lead_id: Optional[int], stage_name: Optional[str]):
 
     try:
         log(f"Atualizando lead {lead_id} para etapa '{stage_name}' (status_id={status_id})")
-        r = requests.patch(url, headers=headers, json=payload, timeout=30)
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
         r.raise_for_status()
     except Exception as e:
         log("Erro ao atualizar etapa do lead:", repr(e))
