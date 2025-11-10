@@ -3,10 +3,12 @@ import json
 import datetime
 from typing import Optional, Tuple, Dict, Any
 
+from urllib.parse import parse_qs
+
 import requests
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from openai import OpenAI
-from urllib.parse import parse_qs
 
 # =========================================
 # Configurações básicas
@@ -157,6 +159,10 @@ def update_lead_stage(lead_id: Optional[int], stage_name: Optional[str]):
     r.raise_for_status()
 
 
+# =========================================
+# Helpers para normalizar payload do Kommo
+# =========================================
+
 def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
     """
     Kommo às vezes envia webhooks como application/x-www-form-urlencoded.
@@ -177,11 +183,19 @@ def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
 
     account = {"subdomain": first("account[subdomain]")}
 
-    message = {"text": first("message[text]")}
+    # Monta o dicionário message com QUALQUER campo message[xyz]
+    message: Dict[str, Any] = {}
+    for key, vals in qs.items():
+        if key.startswith("message[") and key.endswith("]"):
+            inner = key[len("message["):-1]  # pega o que estiver entre [ ]
+            if vals:
+                message[inner] = vals[0]
 
+    # lead_id
     lead_id = safe_int(first("lead[id]"))
     lead = {"id": lead_id} if lead_id is not None else {}
 
+    # telefone
     phone = (
         first("contact[phones][0][value]")
         or first("contact[phones][0][phone]")
@@ -190,7 +204,9 @@ def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
     )
     contact = {"phones": [{"value": phone}]} if phone else {}
 
-    data: Dict[str, Any] = {"message": message}
+    data: Dict[str, Any] = {}
+    if message:
+        data["message"] = message
     if lead:
         data["lead"] = lead
     if contact:
@@ -208,19 +224,15 @@ def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
 # Helper para chamar a Erika (Assistants API)
 # =========================================
 
-def call_openai_erika(
-    user_message: str,
-    lead_id: Optional[int] = None,
-    phone: Optional[str] = None
-) -> str:
+def call_openai_erika(user_message: str,
+                      lead_id: Optional[int] = None,
+                      phone: Optional[str] = None) -> str:
     """
     Chama a Erika via Assistants API usando o ID configurado em OPENAI_ASSISTANT_ID.
     Retorna o texto bruto da resposta da assistente (incluindo o bloco ERIKA_ACTION).
     """
     if not ERIKA_ASSISTANT_ID:
-        raise RuntimeError(
-            "OPENAI_ASSISTANT_ID (ID da Erika) não configurado nas variáveis de ambiente."
-        )
+        raise RuntimeError("OPENAI_ASSISTANT_ID (ID da Erika) não configurado nas variáveis de ambiente.")
 
     meta_parts = []
     if lead_id:
@@ -248,9 +260,7 @@ def call_openai_erika(
     log("Status do run da Erika:", run.status)
 
     if run.status != "completed":
-        raise RuntimeError(
-            f"Execução da Erika não completou corretamente. status={run.status}"
-        )
+        raise RuntimeError(f"Execução da Erika não completou corretamente. status={run.status}")
 
     msgs = client.beta.threads.messages.list(thread_id=thread.id, limit=10)
 
@@ -276,30 +286,30 @@ def call_openai_erika(
 
 @app.post("/kommo-webhook")
 async def kommo_webhook(request: Request):
-    # Lê o corpo uma única vez
-    body = await request.body()
-    log("Webhook - raw body (primeiros 200 bytes):", body[:200])
+    # Lê o corpo bruto para poder tratar JSON ou x-www-form-urlencoded
+    raw_body = await request.body()
+    log("Webhook - raw body (primeiros 200 bytes):", raw_body[:200])
 
     content_type = (request.headers.get("content-type") or "").lower()
 
-    # Tenta decidir se é JSON ou x-www-form-urlencoded
-    if "application/json" in content_type:
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except Exception as e:
-            log("Erro ao decodificar JSON do webhook:", repr(e))
-            raise HTTPException(status_code=400, detail="Payload JSON inválido")
-    else:
-        try:
-            payload = parse_kommo_form_urlencoded(body)
-        except Exception as e:
-            log("Erro ao decodificar form-url-encoded do webhook:", repr(e))
-            raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+    # Tenta normalizar o payload dependendo do content-type
+    try:
+        if "application/json" in content_type:
+            payload = json.loads(raw_body.decode("utf-8"))
+        elif "application/x-www-form-urlencoded" in content_type:
+            payload = parse_kommo_form_urlencoded(raw_body)
+        else:
+            # Fallback: tenta JSON primeiro
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except Exception:
+                # Último recurso: trata como form-url-encoded
+                payload = parse_kommo_form_urlencoded(raw_body)
+    except Exception as e:
+        log("Erro ao normalizar payload do webhook:", repr(e))
+        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
 
-    log(
-        "Webhook payload normalizado (primeiros 1000 chars):",
-        json.dumps(payload, ensure_ascii=False)[:1000],
-    )
+    log("Webhook payload normalizado (primeiros 1000 chars):", json.dumps(payload)[:1000])
 
     # Validação opcional de subdomínio
     if AUTHORIZED_SUBDOMAIN:
@@ -309,16 +319,16 @@ async def kommo_webhook(request: Request):
             subdomain = account.get("subdomain") or account.get("name")
         if subdomain and subdomain != AUTHORIZED_SUBDOMAIN:
             log("Subdomínio não autorizado:", subdomain)
-            raise HTTPException(
-                status_code=401,
-                detail=f"Subdomínio não autorizado: {subdomain}",
-            )
+            raise HTTPException(status_code=401, detail=f"Subdomínio não autorizado: {subdomain}")
 
     data = payload.get("data") or payload
 
-    # Extração da mensagem de texto
+    # Extração da mensagem de texto (mais flexível)
+    msg_block = data.get("message") or {}
     message_text = (
-        (data.get("message") or {}).get("text")
+        msg_block.get("text")        # formato comum em JSON
+        or msg_block.get("body")     # alguns webhooks usam "body"
+        or msg_block.get("message")  # fallback genérico
         or (data.get("conversation") or {}).get("last_message", {}).get("text")
         or (data.get("last_message") or {}).get("text")
         or data.get("text")
@@ -358,9 +368,7 @@ async def kommo_webhook(request: Request):
         ai_full = call_openai_erika(message_text, lead_id=lead_id, phone=phone)
     except Exception as e:
         log("Erro ao chamar Erika:", repr(e))
-        raise HTTPException(
-            status_code=500, detail="Erro ao processar resposta da Erika"
-        )
+        raise HTTPException(status_code=500, detail="Erro ao processar resposta da Erika")
 
     # Separa texto para o cliente e bloco ERIKA_ACTION
     visible_text, action = split_erika_output(ai_full)
@@ -368,13 +376,13 @@ async def kommo_webhook(request: Request):
     reply_text = (
         visible_text.strip()
         if visible_text and visible_text.strip()
-        else "Olá! Sou a Erika, do time TecBrilho 🙂 Como posso cuidar do seu carro hoje?"
+        else "Oi! Sou a Erika, da TecBrilho. Como posso te ajudar hoje?"
     )
 
     # Cria notas e tenta mover etapa, se possível
     if lead_id:
         try:
-            # Nota com a resposta da Erika (sem o bloco técnico)
+            # Nota com a resposta da Erika
             add_kommo_note(lead_id, f"Erika 🧠:\n{reply_text}")
 
             if action and isinstance(action, dict):
@@ -387,14 +395,13 @@ async def kommo_webhook(request: Request):
                     update_lead_stage(lead_id, stage)
         except Exception as e:
             # Não quebra a resposta para o Kommo se der erro na nota/movimentação
-            log(
-                "Erro ao registrar nota ou atualizar estágio no Kommo:",
-                repr(e),
-            )
+            log("Erro ao registrar nota ou atualizar estágio no Kommo:", repr(e))
 
-    return {
-        "status": "ok",
-        "lead_id": lead_id,
-        "ai_response": reply_text,
-        "erika_action": action,
-    }
+    return JSONResponse(
+        {
+            "status": "ok",
+            "lead_id": lead_id,
+            "ai_response": reply_text,
+            "erika_action": action,
+        }
+    )
