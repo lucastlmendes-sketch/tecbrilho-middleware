@@ -3,9 +3,7 @@ import json
 import datetime
 from typing import Optional, Tuple, Dict, Any
 
-from urllib.parse import parse_qs
 import re
-
 import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -35,7 +33,6 @@ def log(*args):
 
 # =========================================
 # Mapeamento de etapas do funil -> variáveis de ambiente
-# (os valores das envs você já configurou no Render)
 # =========================================
 
 STAGE_ENV_MAP = {
@@ -131,7 +128,6 @@ def split_erika_output(full_text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
 
     start = full_text.rfind(ACTION_START)
     if start == -1:
-        # Nenhum bloco encontrado
         return full_text.strip(), None
 
     visible_text = full_text[:start].rstrip()
@@ -158,77 +154,6 @@ def split_erika_output(full_text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
 
 
 # =========================================
-# Parser de Webhook form-urlencoded
-# =========================================
-
-def parse_kommo_form_urlencoded(body: bytes) -> Dict[str, Any]:
-    text = body.decode("utf-8", "ignore")
-    qs = parse_qs(text)
-
-    def first(key, default=None):
-        vals = qs.get(key)
-        return vals[0] if vals else default
-
-    def safe_int(v):
-        try:
-            return int(v)
-        except Exception:
-            return None
-
-    account = {"subdomain": first("account[subdomain]")}
-
-    msg_text = (
-        first("message[text]")
-        or first("message[body]")
-        or first("message[message]")
-        or first("message[add][0][text]")
-        or first("message[add][0][message]")
-    )
-
-    message: Dict[str, Any] = {}
-    for k, vals in qs.items():
-        if k.startswith("message[") and k.endswith("]"):
-            inner = k[len("message["):-1]
-            if vals:
-                message[inner] = vals[0]
-
-    if msg_text:
-        message["text"] = msg_text
-
-    lead_id = safe_int(
-        first("lead[id]")
-        or first("leads[0][id]")
-        or first("message[add][0][entity_id]")
-        or first("message[add][0][element_id]")
-    )
-
-    phone = (
-        first("contact[phones][0][value]")
-        or first("contact[phones][0][phone]")
-        or first("contact[phone]")
-        or first("phone")
-    )
-
-    contact = {"phones": [{"value": phone}]} if phone else {}
-    lead = {"id": lead_id} if lead_id is not None else {}
-
-    data: Dict[str, Any] = {}
-    if message:
-        data["message"] = message
-    if lead:
-        data["lead"] = lead
-    if contact:
-        data["contact"] = contact
-
-    payload: Dict[str, Any] = {"account": account, "data": data}
-    event = first("event")
-    if event:
-        payload["event"] = event
-
-    return payload
-
-
-# =========================================
 # EXTRATOR DE TELEFONE UNIVERSAL — 360°
 # =========================================
 
@@ -238,27 +163,19 @@ def extract_phone_intelligent(payload: dict) -> Optional[str]:
     e encontra qualquer formato de telefone.
     """
 
-    # Transforma tudo em texto para busca ampla
     try:
         as_text = json.dumps(payload, ensure_ascii=False)
     except Exception:
         as_text = str(payload)
 
-    # 1 — Buscar formato internacional padrão (11–15 dígitos)
     matches = re.findall(r"\+?\d{11,15}", as_text)
-    if matches:
-        # pega o maior número (geralmente o telefone real)
-        phone = max(matches, key=len)
-    else:
-        phone = None
+    phone = max(matches, key=len) if matches else None
 
-    # 2 — Detecta formato WABA
     if not phone:
         waba = re.search(r"waba:\+?\d{11,15}", as_text)
         if waba:
             phone = waba.group().replace("waba:", "")
 
-    # 3 — Busca campos explícitos no dict
     if not phone:
         possible_keys = ["phone", "telefone", "mobile", "value", "tel"]
 
@@ -285,7 +202,6 @@ def extract_phone_intelligent(payload: dict) -> Optional[str]:
     if not phone:
         return None
 
-    # 4 — sanitização
     phone = re.sub(r"[^\d+]", "", phone)
     if not phone.startswith("+"):
         if phone.startswith("55") and len(phone) >= 12:
@@ -300,9 +216,11 @@ def extract_phone_intelligent(payload: dict) -> Optional[str]:
 # Erika (Assistants API)
 # =========================================
 
-def call_openai_erika(user_message: str,
-                      lead_id: Optional[int] = None,
-                      phone: Optional[str] = None) -> str:
+def call_openai_erika(
+    user_message: str,
+    lead_id: Optional[int] = None,
+    phone: Optional[str] = None
+) -> str:
     """
     Chama a Erika via Assistants API usando o ID configurado em OPENAI_ASSISTANT_ID.
     Retorna o texto bruto da resposta da assistente (incluindo o bloco ERIKA_ACTION).
@@ -340,7 +258,6 @@ def call_openai_erika(user_message: str,
 
     msgs = client.beta.threads.messages.list(thread_id=thread.id, limit=10)
 
-    # Pega a última mensagem da assistente com conteúdo de texto
     for msg in msgs.data:
         if msg.role == "assistant":
             texts = []
@@ -371,93 +288,70 @@ async def health():
 
 
 # =========================================
-# WEBHOOK PRINCIPAL KOMMO
+# Endpoint usado pelo Chatbot Privado (SalesBot + Widget)
 # =========================================
 
-@app.post("/kommo-webhook")
-async def kommo_webhook(request: Request):
-    raw_body = await request.body()
-    log("Webhook - raw body (primeiros 200 bytes):", raw_body[:200])
-
-    content_type = (request.headers.get("content-type") or "").lower()
-
-    # Normaliza payload (JSON ou x-www-form-urlencoded)
+@app.post("/erika-chat")
+async def erika_chat(request: Request):
+    """
+    Endpoint chamado pelo widget privado do Kommo (SalesBot).
+    Espera um JSON com:
+        {
+            "message": "...",
+            "lead_id": "123",
+            "contact_name": "...",
+            "contact_phone": "+55..."
+        }
+    Retorna:
+        {
+            "status": "success" | "error",
+            "reply": "mensagem para o cliente"
+        }
+    O SalesBot usa "reply" para responder no WhatsApp.
+    """
     try:
-        if "application/json" in content_type:
-            payload = json.loads(raw_body.decode("utf-8"))
-        elif "application/x-www-form-urlencoded" in content_type:
-            payload = parse_kommo_form_urlencoded(raw_body)
-        else:
-            # Fallback: tenta JSON, se falhar, tenta form
-            try:
-                payload = json.loads(raw_body.decode("utf-8"))
-            except Exception:
-                payload = parse_kommo_form_urlencoded(raw_body)
+        body = await request.json()
     except Exception as e:
-        log("Erro ao normalizar payload do webhook:", repr(e))
-        raise HTTPException(status_code=400, detail="Payload inválido ou ausente")
+        log("Erro ao ler JSON em /erika-chat:", repr(e))
+        raise HTTPException(status_code=400, detail="JSON inválido")
 
-    log("Payload normalizado (primeiros 1000 chars):", json.dumps(payload)[:1000])
+    log("Payload recebido em /erika-chat:", json.dumps(body)[:1000])
 
-    # Validação opcional de subdomínio
+    # Validação opcional de subdomínio, se você decidir enviar isso no body
     if AUTHORIZED_SUBDOMAIN:
-        account = payload.get("account") or {}
-        subdomain = None
-        if isinstance(account, dict):
-            subdomain = account.get("subdomain") or account.get("name")
+        account = body.get("account") or {}
+        subdomain = account.get("subdomain") if isinstance(account, dict) else None
         if subdomain and subdomain != AUTHORIZED_SUBDOMAIN:
-            log("Subdomínio não autorizado:", subdomain)
+            log("Subdomínio não autorizado em /erika-chat:", subdomain)
             raise HTTPException(status_code=401, detail=f"Subdomínio não autorizado: {subdomain}")
 
-    data = payload.get("data") or payload
+    message = (body.get("message") or "").strip()
+    if not message:
+        log("Sem 'message' em /erika-chat → ignorado")
+        raise HTTPException(status_code=400, detail="Campo 'message' é obrigatório")
 
-    # Extração da mensagem de texto
-    msg_block = data.get("message") or {}
-    message_text = (
-        msg_block.get("text")
-        or msg_block.get("body")
-        or msg_block.get("message")
-        or (data.get("conversation") or {}).get("last_message", {}).get("text")
-        or (data.get("last_message") or {}).get("text")
-        or data.get("text")
-        or ""
-    )
-
-    if not str(message_text).strip():
-        log("Sem mensagem → ignorado")
-        return {"status": "ignored", "reason": "sem mensagem"}
-
-    # Extração do lead_id
-    lead = data.get("lead") or {}
-    lead_id = (
-        lead.get("id")
-        or data.get("lead_id")
-        or (data.get("conversation") or {}).get("lead_id")
-    )
-
-    # Tentativa adicional de achar lead_id dentro de message
-    if not lead_id and isinstance(msg_block, dict):
-        for k, v in msg_block.items():
-            k_str = str(k)
-            if "entity_id" in k_str or "element_id" in k_str:
-                try:
-                    lead_id = int(v)
-                    break
-                except (TypeError, ValueError):
-                    continue
-
-    # Extração de telefone (agressiva)
-    phone = extract_phone_intelligent(payload)
-    log("📞 Telefone extraído:", phone)
-
-    # Chama Erika
+    lead_id_raw = body.get("lead_id")
     try:
-        ai_full = call_openai_erika(message_text, lead_id=lead_id, phone=phone)
-    except Exception as e:
-        log("Erro ao chamar Erika:", repr(e))
-        raise HTTPException(status_code=500, detail="Erro ao processar resposta da Erika")
+        lead_id = int(lead_id_raw) if lead_id_raw is not None else None
+    except (TypeError, ValueError):
+        lead_id = None
 
-    # Separa texto para o cliente e bloco ERIKA_ACTION
+    phone = body.get("contact_phone") or body.get("phone")
+    if not phone:
+        phone = extract_phone_intelligent(body)
+
+    try:
+        ai_full = call_openai_erika(message, lead_id=lead_id, phone=phone)
+    except Exception as e:
+        log("Erro ao chamar Erika em /erika-chat:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "reply": "Desculpe, tive um problema para responder agora. Tente novamente em instantes."
+            },
+        )
+
     visible_text, action = split_erika_output(ai_full)
 
     reply_text = (
@@ -466,30 +360,24 @@ async def kommo_webhook(request: Request):
         else "Oi! Sou a Erika, da TecBrilho. Como posso te ajudar hoje?"
     )
 
-    # Cria notas e tenta mover etapa, se possível
-    if lead_id:
+    # 🎯 AQUI ESTÁ SUA REGRA NOVA:
+    # NÃO registramos a resposta completa em nota.
+    # Apenas usamos o bloco ERIKA_ACTION (summary_note, kommo_suggested_stage, etc.).
+    if lead_id and action and isinstance(action, dict):
         try:
-            # Nota com a resposta da Erika
-            add_kommo_note(lead_id, f"Erika 🧠:\n{reply_text}")
+            summary = action.get("summary_note")
+            if summary:
+                add_kommo_note(lead_id, summary)
 
-            if action and isinstance(action, dict):
-                summary = action.get("summary_note")
-                if summary:
-                    add_kommo_note(lead_id, f"ERIKA_ACTION: {summary}")
-
-                stage = action.get("kommo_suggested_stage")
-                if stage:
-                    update_lead_stage(lead_id, stage)
+            stage = action.get("kommo_suggested_stage")
+            if stage:
+                update_lead_stage(lead_id, stage)
         except Exception as e:
-            log("Erro ao registrar nota ou atualizar estágio no Kommo:", repr(e))
+            log("Erro ao registrar notas/etapa em /erika-chat:", repr(e))
 
-    # Esse retorno pode ser usado pelo Salesbot ({{response.reply}})
     return JSONResponse(
         {
-            "status": "ok",
-            "lead_id": lead_id,
-            "phone": phone,
+            "status": "success",
             "reply": reply_text,
-            "action": action,
         }
     )
