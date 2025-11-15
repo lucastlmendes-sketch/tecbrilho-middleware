@@ -1,16 +1,14 @@
 {
-  "name": "kommo-erika-middleware",
+  "name": "tecbrilho-middleware",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.0",
-    "openai": "^4.57.0",
-    "crypto": "^1.0.1"
-  },
-  "engines": {
-    "node": ">=18"
+    "axios": "^1.7.7",
+    "express": "^4.19.2",
+    "openai": "^4.77.0",
+    "dotenv": "^16.4.5"
   }
 }
