@@ -1,0 +1,16 @@
+{
+  "name": "kommo-erika-middleware",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "openai": "^4.57.0",
+    "crypto": "^1.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
