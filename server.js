@@ -1,116 +1,129 @@
-// server.js
+// ================================
+// SERVER.JS – Middleware TecBrilho
+// Compatível com Chat API v2
+// ================================
+
 require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
+
+// Módulos auxiliares
 const { askErika } = require("./openaiClient");
-const {
-  getOrCreateLeadForPhone,
-  updateLeadStage,
-  addLeadNote
+const { 
+  getOrCreateLeadForPhone, 
+  updateLeadStage, 
+  addLeadNote 
 } = require("./kommoCrmClient");
-const { sendErikaMessageToChat } = require("./kommoChatClient");
+
+const { 
+  sendErikaMessageToChat 
+} = require("./kommoChatClient");
 
 const app = express();
 
-// Precisamos do rawBody para validar X-Signature do Chat API
+// ================================
+// MIDDLEWARE PARA RAW BODY (Chat API exige isso)
+// ================================
 app.use(
-  "/webhook/kommo-chat",
-  express.raw({ type: "*/*" })
+  "/kommo/chat-webhook",
+  express.raw({ type: "*/*" })  // NÃO remover
 );
 
-// Para outros endpoints, JSON normal
+// Outras rotas usam JSON normal:
 app.use(express.json());
 
-const KOMMO_CHAT_WEBHOOK_SECRET = process.env.KOMMO_CHAT_WEBHOOK_SECRET;
 
-// Valida X-Signature (webhook v2 Chats API)
+// ================================
+// VALIDAÇÃO DA ASSINATURA DO WEBHOOK (X-Signature)
+// ================================
+const WEBHOOK_SECRET = process.env.KOMMO_CHAT_WEBHOOK_SECRET;
+
 function isValidChatWebhookSignature(req) {
-  const signature = req.header("X-Signature");
-  if (!signature || !KOMMO_CHAT_WEBHOOK_SECRET) return false;
+  const signature = req.headers["x-signature"];
+  if (!signature) return false;
 
-  const body = req.body; // buffer
+  if (!WEBHOOK_SECRET) {
+    console.error("❌ Faltando KOMMO_CHAT_WEBHOOK_SECRET no Render");
+    return false;
+  }
+
   const expected = crypto
-    .createHmac("sha1", KOMMO_CHAT_WEBHOOK_SECRET)
-    .update(body)
+    .createHmac("sha1", WEBHOOK_SECRET)
+    .update(req.body)
     .digest("hex");
 
   return signature === expected;
 }
 
-// Healthcheck simples para o Render
-app.get("/", (req, res) => {
-  res.send("Kommo + Erika middleware rodando ✅");
-});
 
-/**
- * WEBHOOK DO NOVO MENU (Chats API Webhook v2)
- * URL sugerida: https://kommo-middleware.onrender.com/webhook/kommo-chat
- */
-app.post("/webhook/kommo-chat", async (req, res) => {
+// ================================
+// ROTA PRINCIPAL DO CHAT API (Webhook)
+// ================================
+app.post("/kommo/chat-webhook", async (req, res) => {
   try {
+    // 1) Validar webhook
     if (!isValidChatWebhookSignature(req)) {
-      console.warn("Assinatura inválida no webhook de chat");
+      console.warn("⚠️ Webhook rejeitado: assinatura inválida");
       return res.status(401).send("Invalid signature");
     }
 
-    const json = JSON.parse(req.body.toString("utf8"));
-    const msg = json.message;
+    // 2) Parsear JSON manualmente (raw → string → JSON)
+    const data = JSON.parse(req.body.toString("utf8"));
 
-    // Estrutura v2 de exemplo:
-    // json.message.receiver.phone, json.message.message.text, etc. :contentReference[oaicite:5]{index=5}
-    const clientPhone = msg.receiver?.phone;
-    const clientName = msg.receiver?.name || "Cliente";
-    const text = msg.message?.text || "";
-
-    if (!clientPhone || !text) {
-      console.log("Webhook sem telefone ou texto, ignorando.");
+    const msg = data.message;
+    if (!msg) {
+      console.log("Webhook ignorado: sem mensagem");
       return res.status(200).send("ok");
     }
 
-    // Já responde 200 rápido (recomendado pelo Kommo)
+    const text = msg.message?.text || "";
+    const phone = msg.receiver?.phone || "";
+    const name = msg.receiver?.name || "Cliente";
+    const conversationId = msg.conversation?.id;
+
+    // Retornar rápido para o Kommo (obrigatório)
     res.status(200).send("ok");
 
-    // Prepara info pro Erika
-    const conversationId = msg.conversation?.id;
-    const clientProfile = {
-      id: msg.receiver.id,
-      name: clientName,
-      phone: clientPhone,
-      email: msg.receiver.email || "",
-      avatar: ""
-    };
-
-    // 1) Lead (criar/recuperar) — por padrão, deixo createIfMissing = action.create_lead_if_missing
-    // mas só posso saber isso depois de falar com a Erika.
-    // Então passo "createIfMissing: true" num primeiro momento, porque no primeiro contato
-    // geralmente queremos registrar o lead.
-    const { leadId } = await getOrCreateLeadForPhone({
-      phone: clientPhone,
-      name: clientName,
-      createIfMissing: true,
-      sourceText: `WhatsApp - conversa automática Erika`
-    });
-
-    // 2) Pergunta para a Erika
-    const { clientText, erikaAction } = await askErika({
-      phone: clientPhone,
-      messageText: text,
-      leadInfo: {
-        id: leadId,
-        name: clientName
-      }
-    });
-
-    // 3) Envia resposta da Erika para o cliente via WhatsApp (Chats API)
-    if (clientText && conversationId) {
-      await sendErikaMessageToChat({
-        conversationId,
-        clientProfile,
-        text: clientText
-      });
+    if (!text || !phone || !conversationId) {
+      console.log("Mensagem ignorada: dados insuficientes");
+      return;
     }
 
-    // 4) Aplica ERIKA_ACTION (etapa de funil e nota)
+    // ================================
+    // 3) Garantir um lead existente
+    // ================================
+    const { leadId } = await getOrCreateLeadForPhone({
+      phone,
+      name,
+      createIfMissing: true,
+      sourceText: "WhatsApp via Erika"
+    });
+
+    // ================================
+    // 4) Enviar para Erika (OpenAI)
+    // ================================
+    const { clientText, erikaAction } = await askErika({
+      phone,
+      messageText: text,
+      leadInfo: { id: leadId, name }
+    });
+
+    // ================================
+    // 5) Responder cliente no WhatsApp via Chats API
+    // ================================
+    await sendErikaMessageToChat({
+      conversationId,
+      clientProfile: {
+        id: msg.receiver.id,
+        name,
+        phone
+      },
+      text: clientText
+    });
+
+    // ================================
+    // 6) Aplicar ações técnicas do ERIKA_ACTION no Kommo
+    // ================================
     if (erikaAction && leadId) {
       if (erikaAction.kommo_suggested_stage) {
         await updateLeadStage(leadId, erikaAction.kommo_suggested_stage);
@@ -120,14 +133,25 @@ app.post("/webhook/kommo-chat", async (req, res) => {
         await addLeadNote(leadId, erikaAction.summary_note);
       }
     }
+
   } catch (e) {
-    console.error("Erro no webhook /webhook/kommo-chat:", e);
-    // não dá pra responder aqui se já mandamos 200, então só loga.
+    console.error("❌ Erro no webhook:", e);
   }
 });
 
-// Porta para o Render
+
+// ================================
+// HEALTHCHECK PARA O RENDER
+// ================================
+app.get("/", (req, res) => {
+  res.send("🚀 TecBrilho Middleware rodando com sucesso!");
+});
+
+
+// ================================
+// INICIAR SERVIDOR
+// ================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor ouvindo na porta ${PORT}`);
+  console.log(`🔥 Servidor iniciado na porta ${PORT}`);
 });
