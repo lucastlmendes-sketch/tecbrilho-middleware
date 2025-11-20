@@ -56,7 +56,6 @@ def kommo_headers() -> Dict[str, str]:
 
 # -----------------------------------------------------------------------------
 # MAPA DE ETAPAS DO FUNIL (NOME → ID)
-# (USAMOS VARIAÇÕES DE NOMES PARA CASAR COM O QUE A ERIKA FALA)
 # -----------------------------------------------------------------------------
 
 STAGE_NAME_TO_ID: Dict[str, int] = {
@@ -88,7 +87,6 @@ STAGE_NAME_TO_ID: Dict[str, int] = {
 
     # 9
     "SOLICITAR FEEDBACK": 96677123,
-    "SOLICITAR FEEDBACK ": 96677123,
 
     # 10
     "SOLICITAR AVALIAÇÃO NO GOOGLE": 96677127,
@@ -151,7 +149,6 @@ def get_lead_notes(lead_id: int, limit: int = 5) -> str:
         params_note = note.get("params", {}) or {}
         text = params_note.get("text")
         if not text:
-            # em alguns tipos pode vir em outro campo. Simplificamos.
             text = json.dumps(params_note, ensure_ascii=False)
         summaries.append(f"- ({note_type}) {text}")
 
@@ -218,7 +215,7 @@ def move_lead_to_stage(lead_id: int, stage_name: str) -> Optional[int]:
 JSON_INSTRUCTIONS = """
 INSTRUÇÕES EXTRAS PARA FORMATO DE RESPOSTA:
 
-Você é a Erika, assistente da TecBrilho, integrada ao CRM Kommo por meio de um robô interno.
+Você é a Erika, assistente da TecBrilho, integrada ao CRM Kommo via webhook de chat.
 
 Além de todas as suas regras já configuradas no painel da OpenAI, você DEVE responder
 SEMPRE em JSON válido, com este formato exato (sem texto fora do JSON):
@@ -305,7 +302,6 @@ def call_erika(incoming_text: str, notes_context: str) -> Dict[str, Any]:
         # pega a última mensagem do assistente
         for msg in messages.data:
             if msg.role == "assistant":
-                # pega o primeiro bloco de texto
                 for content in msg.content:
                     if content.type == "text":
                         text_value = content.text.value.strip()
@@ -323,82 +319,48 @@ def call_erika(incoming_text: str, notes_context: str) -> Dict[str, Any]:
 
 
 # -----------------------------------------------------------------------------
-# RESPOSTA PARA O SALESBOT (RETURN_URL)
+# ENVIO DE MENSAGEM PARA O CHAT (WHATSAPP) – /api/v4/chats/messages
 # -----------------------------------------------------------------------------
 
-def chunk_text(text: str, max_len: int = 80) -> List[str]:
-    """Divide o texto em pedaços de até max_len caracteres."""
-    text = text.strip()
+def send_chat_message(conversation_id: str, text: str) -> None:
+    """Envia mensagem de texto para o chat (WhatsApp) via API de chats da Kommo."""
+    if not KOMMO_BASE_URL:
+        logger.error("KOMMO_BASE_URL não configurado; não é possível enviar mensagem.")
+        return
+
+    if not conversation_id:
+        logger.error("conversation_id vazio; não é possível enviar mensagem.")
+        return
+
+    text = (text or "").strip()
     if not text:
-        return []
+        logger.warning("Texto de resposta vazio; nada será enviado.")
+        return
 
-    chunks: List[str] = []
-    current = ""
-
-    for part in text.split("\n"):
-        for word in part.split(" "):
-            if not word:
-                continue
-            if len(current) + len(word) + 1 > max_len:
-                if current:
-                    chunks.append(current)
-                current = word
-            else:
-                current = f"{current} {word}".strip()
-        if current:
-            chunks.append(current)
-            current = ""
-
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def send_salesbot_reply(return_url: str, erika_response: Dict[str, Any]) -> None:
-    """
-    Envia o resultado para o Salesbot via return_url.
-    Consultando a doc 'SalesBot widget block execution confirmation'.
-    """
-    reply_text = erika_response.get("reply_to_customer") or ""
-    if not reply_text:
-        reply_text = "Tive um probleminha técnico ao processar a resposta agora. Pode repetir a última mensagem?"
-
-    # Quebra em pedaços de até 80 caracteres por causa da limitação do handler "show".
-    chunks = chunk_text(reply_text, max_len=80)
-
-    execute_handlers: List[Dict[str, Any]] = []
-    for chunk in chunks:
-        execute_handlers.append(
-            {
-                "handler": "show",
-                "params": {
-                    "type": "text",
-                    "value": chunk,
-                },
-            }
-        )
-
+    url = f"{KOMMO_BASE_URL}/api/v4/chats/messages"
     payload = {
-        "data": erika_response,  # inteiro, para o Salesbot poder usar {{json.*}} depois
-        "execute_handlers": execute_handlers,
+        "chat_id": conversation_id,
+        "message_type": "text",
+        "text": text,
     }
 
-    headers = kommo_headers()
-
     try:
-        resp = requests.post(return_url, headers=headers, json=payload, timeout=10)
+        resp = requests.post(url, headers=kommo_headers(), json=payload, timeout=10)
         resp.raise_for_status()
-        logger.info(f"Salesbot continuado com sucesso via return_url.")
+        logger.info(f"Mensagem enviada para chat {conversation_id}.")
     except Exception as e:
-        logger.error(f"Erro ao chamar return_url do Salesbot: {e}")
+        logger.error(f"Erro ao enviar mensagem para chat {conversation_id}: {e}")
 
 
 # -----------------------------------------------------------------------------
-# PROCESSAMENTO DO WEBHOOK widget_request
+# VALIDAÇÃO DO JWT DO WEBHOOK
 # -----------------------------------------------------------------------------
 
 def validate_jwt_token(token: str) -> Optional[Dict[str, Any]]:
-    """Valida o JWT vindo do Kommo (widget_request)."""
+    """Valida o JWT vindo do Kommo (header X-Signature ou campo token)."""
+    if not token:
+        return None
+
     if not KOMMO_CLIENT_SECRET:
         logger.warning("KOMMO_CLIENT_SECRET não configurado, NÃO validando JWT.")
         try:
@@ -419,48 +381,51 @@ def validate_jwt_token(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def process_widget_request(payload: Dict[str, Any]) -> None:
+# -----------------------------------------------------------------------------
+# PROCESSAMENTO DO WEBHOOK DE CHAT
+# -----------------------------------------------------------------------------
+
+def process_chat_webhook(payload: Dict[str, Any], token: Optional[str]) -> None:
     """
-    Lógica principal: chamada em background quando o webhook chega.
+    Lógica principal: chamada em background quando o webhook de chat chega.
     """
     try:
-        token = payload.get("token")
-        data = payload.get("data", {}) or {}
-        return_url = payload.get("return_url")
-
-        if not token or not return_url:
-            logger.error("Payload do webhook sem token ou return_url.")
-            return
-
-        jwt_payload = validate_jwt_token(token)
-        if not jwt_payload:
-            logger.error("JWT inválido. Abortando processamento.")
-            return
-
-        incoming_message = data.get("message", "").strip()
-        lead_id_raw = data.get("lead") or data.get("lead_id")
-
-        if not incoming_message:
-            logger.warning("Webhook sem mensagem do cliente.")
-            return
-
-        if not lead_id_raw:
-            logger.warning("Webhook sem lead id. A Erika ainda responde, mas não haverá notas/mudança de etapa.")
-            lead_id = None
+        if token:
+            jwt_payload = validate_jwt_token(token)
+            if not jwt_payload:
+                logger.error("JWT inválido. Abortando processamento do webhook.")
+                return
         else:
+            logger.warning("Webhook recebido sem token/JWT. Prosseguindo sem validação de assinatura.")
+
+        message = payload.get("message") or {}
+        incoming_text = (message.get("text") or "").strip()
+        conversation_id = message.get("conversation_id") or message.get("chat_id")
+
+        if not incoming_text:
+            logger.warning("Webhook de chat sem texto de mensagem.")
+            return
+
+        if not conversation_id:
+            logger.error("Webhook sem conversation_id/chat_id; não há para onde responder.")
+            return
+
+        lead = payload.get("lead") or {}
+        lead_id = lead.get("id")
+
+        if lead_id is not None:
             try:
-                lead_id = int(str(lead_id_raw))
+                lead_id = int(str(lead_id))
             except ValueError:
-                logger.error(f"lead_id inválido: {lead_id_raw}")
+                logger.error(f"lead_id inválido: {lead_id}")
                 lead_id = None
 
         notes_context = ""
         if lead_id is not None:
             notes_context = get_lead_notes(lead_id, limit=5)
 
-        erika_json = call_erika(incoming_message, notes_context)
+        erika_json = call_erika(incoming_text, notes_context)
         if not erika_json:
-            # Falha – devolve uma mensagem padrão curta
             erika_json = {
                 "reply_to_customer": "Encontrei um problema técnico aqui, mas já estou cuidando disso. "
                                      "Pode repetir a última mensagem ou tentar de novo em instantes? 😊",
@@ -483,14 +448,13 @@ def process_widget_request(payload: Dict[str, Any]) -> None:
                 if stage_name:
                     move_lead_to_stage(lead_id, stage_name)
             elif action == "ask_human":
-                # Força a etapa "Solicitar Atendimento Humano", mesmo que a Erika tenha esquecido no campo.
                 move_lead_to_stage(lead_id, "Solicitar Atendimento Humano")
 
-        # Por fim, devolve a resposta ao Salesbot
-        send_salesbot_reply(return_url, erika_json)
+        reply_text = erika_json.get("reply_to_customer") or ""
+        send_chat_message(conversation_id, reply_text)
 
     except Exception as e:
-        logger.error(f"Erro inesperado em process_widget_request: {e}")
+        logger.error(f"Erro inesperado em process_chat_webhook: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -499,7 +463,7 @@ def process_widget_request(payload: Dict[str, Any]) -> None:
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"status": "ok", "message": "Kommo ↔ Erika middleware rodando."})
+    return jsonify({"status": "ok", "message": "Kommo ↔ Erika middleware (chat webhook) rodando."})
 
 
 @app.route("/health", methods=["GET"])
@@ -507,22 +471,20 @@ def health():
     return "OK", 200
 
 
-@app.route("/salesbot/webhook", methods=["POST"])
-def salesbot_webhook():
+@app.route("/chat/webhook", methods=["POST"])
+def chat_webhook():
     """
-    Endpoint que o Salesbot chama no handler widget_request.
-
-    A lógica pesada é jogada para uma thread em background, e aqui
-    só devolvemos 200 rápido para não estourar o timeout de 2s
-    mencionado na doc.
+    Endpoint que o Kommo chama para webhooks de chat (nova mensagem, etc.).
+    O Kommo envia JSON com message, lead, contact, etc.
     """
     payload = request.get_json(silent=True) or {}
-    logger.info(f"Webhook recebido do Salesbot: {json.dumps(payload)[:500]}")
+    token = request.headers.get("X-Signature") or payload.get("token")
 
-    # Processa em background
-    threading.Thread(target=process_widget_request, args=(payload,)).start()
+    logger.info(f"Webhook de chat recebido: {json.dumps(payload)[:500]}")
 
-    # Resposta rápida apenas para confirmar recebimento
+    # Processa em background para responder 200 rápido
+    threading.Thread(target=process_chat_webhook, args=(payload, token)).start()
+
     return jsonify({"status": "accepted"}), 200
 
 
