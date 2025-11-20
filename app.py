@@ -461,31 +461,44 @@ def process_chat_webhook(payload: Dict[str, Any], token: Optional[str]) -> None:
 # ROTAS FLASK
 # -----------------------------------------------------------------------------
 
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"status": "ok", "message": "Kommo ↔ Erika middleware (chat webhook) rodando."})
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-
 @app.route("/chat/webhook", methods=["POST"])
 def chat_webhook():
-    """
-    Endpoint que o Kommo chama para webhooks de chat (nova mensagem, etc.).
-    O Kommo envia JSON com message, lead, contact, etc.
-    """
-    payload = request.get_json(silent=True) or {}
-    token = request.headers.get("X-Signature") or payload.get("token")
+    try:
+        print("\n=================== NOVO WEBHOOK RECEBIDO ===================")
 
-    logger.info(f"Webhook de chat recebido: {json.dumps(payload)[:500]}")
+        # Headers
+        print("HEADERS:")
+        for k, v in request.headers.items():
+            print(f"{k}: {v}")
 
-    # Processa em background para responder 200 rápido
-    threading.Thread(target=process_chat_webhook, args=(payload, token)).start()
+        # Query parameters
+        print("\nQUERY PARAMS:")
+        print(request.args.to_dict())
 
-    return jsonify({"status": "accepted"}), 200
+        # Body bruto
+        raw = request.get_data(as_text=True)
+        print("\nRAW BODY:")
+        print(raw)
+
+        # Tentativa de JSON
+        try:
+            json_body = request.get_json(force=True, silent=True)
+            print("\nJSON PARSEADO:")
+            print(json_body)
+        except Exception as e:
+            print("\nERRO AO PARSEAR JSON:", str(e))
+
+        # Form-data
+        print("\nFORM DATA:")
+        print(request.form.to_dict())
+
+        print("============================================================\n")
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        print("ERRO NO WEBHOOK:", str(e))
+        return "erro", 500
 
 
 # -----------------------------------------------------------------------------
