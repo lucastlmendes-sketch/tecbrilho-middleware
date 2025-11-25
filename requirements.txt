@@ -1,8 +1,4 @@
-fastapi
-uvicorn
-python-dotenv
-openai>=1.40.0
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
+flask
+flask-cors
+openai>=1.14.0
+gunicorn
