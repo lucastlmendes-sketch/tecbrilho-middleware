@@ -1,90 +1,88 @@
-# main.py
-from typing import Optional, Dict, Any
-
-from fastapi import FastAPI
-from pydantic import BaseModel
-
-from openai_client import call_erika
-from google_calendar import create_event_from_payload, CalendarError
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+import openai
+import json
+import os
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Modelos para aceitar tanto { phone, message } quanto { root: { ... } }
-class RootPayload(BaseModel):
-    phone: Optional[str] = None
-    message: Optional[str] = None
-    thread_id: Optional[str] = None
+# OPENAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 
+# GOOGLE CALENDAR SETUP
+SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-class WebhookPayload(BaseModel):
-    root: Optional[RootPayload] = None
-    phone: Optional[str] = None
-    message: Optional[str] = None
-    thread_id: Optional[str] = None
+credentials = service_account.Credentials.from_service_account_info(
+    SERVICE_ACCOUNT_INFO,
+    scopes=SCOPES
+)
 
+calendar_service = build("calendar", "v3", credentials=credentials)
 
-def _normalize_payload(payload: WebhookPayload) -> RootPayload:
-    if payload.root is not None:
-        return payload.root
-
-    return RootPayload(
-        phone=payload.phone,
-        message=payload.message,
-        thread_id=payload.thread_id,
-    )
-
-
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
-
+# ROTAS ----------------------------------------------------------
 
 @app.post("/webhook_chat")
-def webhook_chat(payload: WebhookPayload) -> Dict[str, Any]:
-    data = _normalize_payload(payload)
+async def webhook_chat(request: Request):
+    body = await request.json()
 
-    if not data.phone or not data.message:
-        return {
-            "send": [
-                {
-                    "type": "text",
-                    "value": "Tive um probleminha técnico aqui agora, mas já podemos tentar de novo em instantes, tudo bem? 🙏",
-                }
-            ],
-            "variables": {
-                "erro_interno": "Payload inválido: faltando phone ou message.",
-            },
-        }
+    phone = body.get("phone")
+    message = body.get("message")
+    thread_id = body.get("thread_id")  # Pode vir vazio
 
-    # Chama a Erika via OpenAI
-    erika_result = call_erika(phone=data.phone, message=data.message)
+    # 1️⃣ THREAD
+    if not thread_id:
+        thread = openai.beta.threads.create()
+        thread_id = thread.id
 
-    reply_text: str = erika_result["reply"]
-    thread_id: str = erika_result["thread_id"]
-    calendar_payload = erika_result.get("calendar_payload")
+    # 2️⃣ REGISTRA MENSAGEM DO USUÁRIO
+    openai.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=message
+    )
 
-    variables: Dict[str, Any] = {
-        "erika_resposta": reply_text,
-        "thread_id": thread_id,
-    }
+    # 3️⃣ EXECUTA ASSISTANT
+    run = openai.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=ASSISTANT_ID
+    )
 
-    # Se tiver instrução de agenda, tenta criar o evento
-    if calendar_payload:
-        try:
-            event = create_event_from_payload(calendar_payload, phone=data.phone)
-            variables["calendar_event_id"] = event.get("id")
-        except CalendarError as ce:
-            variables["calendar_error"] = f"CalendarError: {ce}"
-        except Exception as e:
-            variables["calendar_error"] = f"Erro inesperado ao criar evento: {e}"
+    # 4️⃣ AGUARDA RESPOSTA
+    while True:
+        run_status = openai.beta.threads.runs.retrieve(
+            thread_id=thread_id,
+            run_id=run.id
+        )
+        if run_status.status == "completed":
+            break
+
+    # 5️⃣ PEGA MENSAGEM DO ASSISTENTE
+    msgs = openai.beta.threads.messages.list(thread_id)
+    assistant_msg = msgs.data[0].content[0].text.value
 
     return {
         "send": [
-            {
-                "type": "text",
-                "value": reply_text,
-            }
+            {"type": "text", "value": assistant_msg}
         ],
-        "variables": variables,
+        "variables": {
+            "thread_id": thread_id
+        }
     }
+
+# ---------------------------------------------------------------
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
