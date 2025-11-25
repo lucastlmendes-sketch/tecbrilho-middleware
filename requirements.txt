@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+openai>=1.31.0
+python-dotenv
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+httpx
