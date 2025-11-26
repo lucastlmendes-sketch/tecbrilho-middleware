@@ -127,8 +127,8 @@ class OpenAIChatClient:
         ctx.append("INFORMAÇÃO GERADA PELO SISTEMA (não foi o cliente que escreveu):")
 
         ctx.append(f"- Telefone: {phone}")
-        if contact_name:
-            ctx.append(f"- Nome (BotConversa): {contact_name}")
+      if contact_name and contact_name.lower() not in ["[nome]", "nome", ""]:
+    ctx.append(f"- Nome (BotConversa): {contact_name}")
 
         if extra_context:
             bc = extra_context.get("botconversa_contact", {})
