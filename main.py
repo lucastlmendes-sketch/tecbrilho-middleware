@@ -61,13 +61,15 @@ async def webhook_chat(payload: Dict[str, Any]):
         contact_info = {}
 
     try:
-        reply, thread = await chat_client.handle_message(
-            contact_id=cid,
-            phone=req.phone,
-            message=req.message,
-            contact_name=contact_name,
-            extra_context={"botconversa_contact": contact_info},
-        )
+       return {
+  "send": [
+    {
+      "type": "text",
+      "value": f"A MENSAGEM QUE O MIDDLEWARE RECEBEU DO BOTCONVERSA FOI: {req.message!r}"
+    }
+  ]
+}
+
     except Exception as exc:
         return {
             "send": [{"type": "text", "value": "Desculpe, tive um probleminha técnico. Pode repetir por favor? 🙏"}],
