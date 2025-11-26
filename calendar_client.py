@@ -20,16 +20,50 @@ def _get_service():
 
 
 def _pick_calendar_id(service_type: str) -> str:
-    """Escolhe o calendário com base no tipo de serviço.
-
-    O Assistente deve chamar a ferramenta passando um service_type
-    compatível com as chaves abaixo (polimentos, higienizacao, etc.).
-    """
     key = service_type.lower().strip()
     cal_id = settings.calendar_ids.get(key)
     if not cal_id:
-        raise ValueError(f"Não existe calendário configurado para o serviço: {service_type}")
+        raise ValueError(f"Calendário não configurado: {service_type}")
     return cal_id
 
 
-def
+def create_calendar_event_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recebe o formato convertido pelo openai_client:
+    {
+      service_type,
+      title,
+      start_iso,
+      end_iso,
+      description,
+      ...
+    }
+    """
+
+    service_type = args.get("service_type", "polimentos")
+    title = args.get("title")
+    description = args.get("description")
+    start_iso = args.get("start_iso")
+    end_iso = args.get("end_iso")
+
+    if not all([title, start_iso, end_iso]):
+        raise ValueError("start_iso, end_iso e title são obrigatórios.")
+
+    cal_id = _pick_calendar_id(service_type)
+    service = _get_service()
+
+    event_body = {
+        "summary": title,
+        "description": description or "",
+        "start": {"dateTime": start_iso, "timeZone": settings.timezone},
+        "end": {"dateTime": end_iso, "timeZone": settings.timezone},
+        "reminders": {"useDefault": True},
+    }
+
+    event = service.events().insert(calendarId=cal_id, body=event_body).execute()
+
+    return {
+        "calendar_id": cal_id,
+        "event_id": event.get("id"),
+        "html_link": event.get("htmlLink"),
+    }
