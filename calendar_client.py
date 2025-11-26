@@ -1,4 +1,3 @@
-import datetime as dt
 import logging
 from typing import Dict, Any
 
@@ -33,55 +32,4 @@ def _pick_calendar_id(service_type: str) -> str:
     return cal_id
 
 
-def create_calendar_event_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Função usada pelo Assistente (via tool call).
-
-    Espera um JSON com (por exemplo):
-
-    {
-      "service_type": "polimentos",
-      "title": "Polimento TecBrilho - João",
-      "description": "Detalhes do serviço",
-      "start_iso": "2025-01-10T09:00:00",
-      "end_iso": "2025-01-10T10:00:00",
-      "customer_name": "João",
-      "customer_phone": "+5511999999999"
-    }
-    """
-    service_type = args.get("service_type") or "polimentos"
-    title = args.get("title") or "Atendimento TecBrilho"
-    description = args.get("description") or ""
-
-    start_iso = args.get("start_iso")
-    end_iso = args.get("end_iso")
-
-    if not start_iso or not end_iso:
-        raise ValueError("start_iso e end_iso são obrigatórios para criar o evento")
-
-    calendar_id = _pick_calendar_id(service_type)
-    service = _get_service()
-
-    event_body = {
-        "summary": title,
-        "description": description,
-        "start": {
-            "dateTime": start_iso,
-            "timeZone": settings.timezone,
-        },
-        "end": {
-            "dateTime": end_iso,
-            "timeZone": settings.timezone,
-        },
-        "reminders": {
-            "useDefault": True,
-        },
-    }
-
-    event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-    logger.info("Evento criado no calendário %s: %s", calendar_id, event.get("id"))
-
-    return {
-        "calendar_id": calendar_id,
-        "event_id": event.get("id"),
-        "html_link": event.get("htmlLink"),
-    }
+def
