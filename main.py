@@ -1,16 +1,16 @@
 import os
-import json
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import settings
+from config import settings  # noqa: F401  # garante que config é carregado
 from openai_client import OpenAIChatClient
 from state_store import StateStore
+import botconversa_client
 
-app = FastAPI(title="TecBrilho Middleware", version="1.0.0")
+app = FastAPI(title="TecBrilho Middleware", version="1.1.0")
 
 # CORS (não é estritamente necessário para o BotConversa, mas não atrapalha)
 app.add_middleware(
@@ -53,10 +53,11 @@ async def webhook_chat(payload: Dict[str, Any]):
     """Endpoint chamado pelo bloco de integração do BotConversa.
 
     1. Lê phone, message, contact_id do body.
-    2. Usa contact_id como identificador único do cliente
+    2. Busca (quando possível) os dados do contato no BotConversa.
+    3. Usa contact_id como identificador único do cliente
        para manter o histórico da conversa no Assistente.
-    3. Chama o Assistente da OpenAI.
-    4. Devolve JSON no formato esperado pelo BotConversa:
+    4. Chama o Assistente da OpenAI.
+    5. Devolve JSON no formato esperado pelo BotConversa:
 
        {
          "send": [
@@ -64,13 +65,10 @@ async def webhook_chat(payload: Dict[str, Any]):
          ],
          "variables": {
            "erika_resposta": "resposta da Erika",
-           "contact_thread_id": "thread_xxx"
+           "contact_thread_id": "thread_xxx",
+           "contact_name": "Nome vindo do BotConversa (se houver)"
          }
        }
-
-    Depois, no BotConversa, você pode:
-      - Mapear send[0].value para um campo de robô (ex: erika_resposta)
-      - Mapear contact_thread_id para outro campo se quiser
     """
 
     # Se o usuário preferir enviar { "root": { ... } }, lidamos com isso também
@@ -86,13 +84,27 @@ async def webhook_chat(payload: Dict[str, Any]):
     except Exception as exc:  # pydantic ValidationError ou outro
         raise HTTPException(status_code=400, detail=f"Erro ao validar payload: {exc}") from exc
 
+    # Definimos um identificador estável para o contato (id do BC, senão telefone)
     contact_id = request_obj.contact_id or request_obj.phone
+
+    # Busca dados do contato no BotConversa (nome, custom_fields, tags, etc.)
+    contact_name: Optional[str] = None
+    botconversa_contact: Dict[str, Any] = {}
+
+    if request_obj.contact_id:
+        botconversa_contact = botconversa_client.fetch_contact(
+            contact_id=request_obj.contact_id,
+            phone=request_obj.phone,
+        ) or {}
+        contact_name = botconversa_contact.get("name") or None
 
     try:
         reply_text, thread_id = await chat_client.handle_message(
             contact_id=contact_id,
             phone=request_obj.phone,
             message=request_obj.message,
+            contact_name=contact_name,
+            extra_context={"botconversa_contact": botconversa_contact} if botconversa_contact else None,
         )
     except Exception as exc:
         # Em caso de erro, devolvemos uma mensagem amigável
@@ -120,6 +132,7 @@ async def webhook_chat(payload: Dict[str, Any]):
         "variables": {
             "erika_resposta": reply_text,
             "contact_thread_id": thread_id,
+            "contact_name": contact_name or "",
         },
     }
 
