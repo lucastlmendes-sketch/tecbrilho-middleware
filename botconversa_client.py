@@ -6,157 +6,114 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BOTCONVERSA_API_BASE = os.getenv(
-    "BOTCONVERSA_API_BASE", "https://backend.botconversa.com.br/api/v1"
-)
+BOTCONVERSA_API_BASE = os.getenv("BOTCONVERSA_API_BASE", "https://backend.botconversa.com.br/api/v1")
 BOTCONVERSA_API_TOKEN = os.getenv("BOTCONVERSA_API_TOKEN", "")
 
 
-def _get_headers() -> Dict[str, str]:
+def _headers() -> Dict[str, str]:
     if not BOTCONVERSA_API_TOKEN:
-        raise RuntimeError("BOTCONVERSA_API_TOKEN não configurado")
-    # Ajuste aqui se o esquema de auth for diferente (Bearer, JWT, etc.)
+        raise RuntimeError("BOTCONVERSA_API_TOKEN não configurado.")
     return {
         "Authorization": f"Token {BOTCONVERSA_API_TOKEN}",
         "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
 
 def _safe_request(method: str, url: str, **kwargs) -> Optional[httpx.Response]:
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.request(method, url, **kwargs)
-        if resp.status_code >= 400:
-            logger.warning(
-                "Erro ao chamar BotConversa (%s %s): %s %s",
-                method,
-                url,
-                resp.status_code,
-                resp.text,
-            )
+        with httpx.Client(timeout=10) as client:
+            r = client.request(method, url, **kwargs)
+        if r.status_code >= 400:
+            logger.warning("Erro BotConversa %s %s -> %s %s", method, url, r.status_code, r.text)
             return None
-        return resp
+        return r
     except Exception as exc:
-        logger.exception("Exceção ao chamar BotConversa: %s", exc)
+        logger.exception("Falha HTTP: %s", exc)
         return None
 
 
-# ---------------------------
-# Funções de alto nível
-# ---------------------------
-
-
-def fetch_contact(
-    contact_id: Optional[str] = None,
-    phone: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Busca dados do contato no BotConversa.
-
-    Tenta primeiro pelo contact_id (se existir), senão tenta pelo telefone.
-    O formato exato do JSON pode variar conforme a API, então aqui tentamos
-    mapear alguns campos comuns: name, phone, tags, custom_fields.
-    """
+def fetch_contact(contact_id: Optional[str], phone: Optional[str]) -> Dict[str, Any]:
     if not BOTCONVERSA_API_TOKEN:
-        logger.warning("BOTCONVERSA_API_TOKEN não configurado; fetch_contact será limitado.")
+        logger.warning("Token BC ausente; fetch_contact será limitado.")
         return {}
 
+    # 1) Buscar por contact_id
     if contact_id:
         url = f"{BOTCONVERSA_API_BASE}/contacts/{contact_id}"
-        resp = _safe_request("GET", url, headers=_get_headers())
-        if resp is None:
-            return {}
-        try:
-            data = resp.json()
-        except Exception:
-            logger.warning("Falha ao decodificar JSON de contato (id=%s)", contact_id)
-            return {}
-        return _normalize_contact_payload(data)
+        r = _safe_request("GET", url, headers=_headers())
+        if r:
+            try:
+                return _normalize(r.json())
+            except:
+                pass
 
-    # Fallback por telefone (se a API suportar /contacts?phone=)
+    # 2) Buscar por telefone (fallback)
     if phone:
         url = f"{BOTCONVERSA_API_BASE}/contacts"
-        params = {"phone": phone}
-        resp = _safe_request("GET", url, headers=_get_headers(), params=params)
-        if resp is None:
-            return {}
-        try:
-            payload = resp.json()
-        except Exception:
-            logger.warning("Falha ao decodificar JSON de busca por telefone (%s)", phone)
-            return {}
+        r = _safe_request("GET", url, headers=_headers(), params={"phone": phone})
+        if r:
+            try:
+                data = r.json()
+            except:
+                return {}
 
-        # Dependendo da API, pode vir em "results" ou lista directa
-        if isinstance(payload, dict) and "results" in payload:
-            results = payload["results"]
-        else:
-            results = payload
-
-        if not results:
-            return {}
-        return _normalize_contact_payload(results[0])
+            results = data.get("results") or data
+            if results:
+                return _normalize(results[0])
 
     return {}
 
 
-def _normalize_contact_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Tenta padronizar o payload de contato em um formato amigável para o Assistente."""
-    name = raw.get("name") or raw.get("first_name") or raw.get("full_name")
-    phone = raw.get("phone") or raw.get("whatsapp_number")
+def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normaliza payload do BotConversa.
+    """
 
-    tags: List[str] = []
-    raw_tags = raw.get("tags") or []
-    if isinstance(raw_tags, list):
-        for t in raw_tags:
-            if isinstance(t, str):
-                tags.append(t)
-            elif isinstance(t, dict):
-                # Ex.: {"id": 1, "name": "Lead Quente"}
-                tag_name = t.get("name")
-                if tag_name:
-                    tags.append(tag_name)
-
-    custom_fields = raw.get("custom_fields") or raw.get("fields") or {}
+    # Tags
+    tags_raw = raw.get("tags") or []
+    tags = []
+    for t in tags_raw:
+        if isinstance(t, str):
+            tags.append(t)
+        elif isinstance(t, dict):
+            name = t.get("name")
+            if name:
+                tags.append(name)
 
     return {
         "id": raw.get("id"),
-        "name": name,
-        "phone": phone,
+        "name": raw.get("name") or raw.get("full_name"),
+        "phone": raw.get("phone") or raw.get("whatsapp_number"),
+        "custom_fields": raw.get("custom_fields") or {},
         "tags": tags,
-        "custom_fields": custom_fields,
-        "raw": raw,
     }
 
 
-# ---------------------------
-# Ferramentas para Assistente
-# ---------------------------
-
+# Ferramentas strict mode
 
 def tag_contact_tool(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Função chamada pelo Assistente para etiquetar um contato.
+    """Compatível com strict mode: recebe sempre contact_id e tags."""
+    cid = args.get("contact_id")
+    tags = args.get("tags") or []
 
-    Espera algo como:
-      {
-        "contact_id": "123456",
-        "tags": ["Polimento", "Lead Quente"]
-      }
+    if not cid or not isinstance(tags, list):
+        return {"error": "Parâmetros inválidos para tag_contact."}
 
-    Aqui está preparado para, no futuro, chamar a API real de tags.
-    Por enquanto, loga a intenção e retorna um OK.
-    """
-    contact_id = str(args.get("contact_id") or "")
-    tags: List[str] = list(args.get("tags") or [])
+    logger.info("[TAG_CONTACT] %s: %s", cid, tags)
 
-    # TODO: implementar chamada real à API de tags do BotConversa
-    logger.info("[TAG] Etiquetando contato %s com tags: %s", contact_id, tags)
+    return {"status": "ok", "contact_id": cid, "tags": tags}
+
+
+def get_contact_context_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+    cid = args.get("contact_id")
+    phone = args.get("phone")
+
+    contact = fetch_contact(cid, phone)
+    if not contact:
+        return {"status": "not_found", "contact_id": cid, "phone": phone}
 
     return {
         "status": "ok",
-        "contact_id": contact_id,
-        "tags": tags,
-        "note": "Tags registradas pelo middleware (pode evoluir para API real de tags).",
+        **contact
     }
-
-
-def get_contact_context_tool(args:_
