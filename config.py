@@ -1,57 +1,74 @@
 import os
-from dataclasses import dataclass
-from typing import Dict, Optional
 import json
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class Settings:
+    """Application settings loaded from environment variables."""
+
     openai_api_key: str
-    openai_assistant_id: str
+    openai_chat_assistant_id: Optional[str]
+    openai_agenda_assistant_id: str
     timezone: str
     google_service_account_info: dict
-    calendar_ids: Dict[str, Optional[str]]
+    google_calendar_id: str
 
     @classmethod
     def load(cls) -> "Settings":
-        openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        openai_assistant_id = os.getenv("OPENAI_ASSISTANT_ID", "")
-
+        # OpenAI
+        openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY não configurado")
-        if not openai_assistant_id:
-            raise RuntimeError("OPENAI_ASSISTANT_ID não configurado")
+            raise RuntimeError("OPENAI_API_KEY não definido no ambiente.")
 
+        # Assistente principal de chat (opcional neste momento)
+        openai_chat_assistant_id = os.getenv("OPENAI_CHAT_ASSISTANT_ID") or os.getenv(
+            "OPENAI_ASSISTANT_ID"
+        )
+
+        # Assistente responsável pelos agendamentos (Erika Agenda)
+        openai_agenda_assistant_id = os.getenv("OPENAI_AGENDA_ASSISTANT_ID")
+        if not openai_agenda_assistant_id:
+            raise RuntimeError(
+                "OPENAI_AGENDA_ASSISTANT_ID não definido. Defina o ID do assistente Erika Agenda."
+            )
+
+        # Timezone padrão
         timezone = os.getenv("TIMEZONE", "America/Sao_Paulo")
 
-        raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-        if not raw_json:
-            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON não configurado")
+        # Credenciais do Google Service Account
+        info_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_INFO") or os.getenv(
+            "GOOGLE_SERVICE_ACCOUNT_JSON"
+        )
+        if not info_str:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_INFO/JSON não definido com as credenciais do service account."
+            )
+
         try:
-            info = json.loads(raw_json)
+            google_service_account_info = json.loads(info_str)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON não é um JSON válido") from exc
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_INFO não é um JSON válido.") from exc
 
-        # A chave privada costuma vir com \n. Convertendo para novas linhas reais:
-        if "private_key" in info and isinstance(info["private_key"], str):
-            info["private_key"] = info["private_key"].replace("\\n", "\n")
-
-        calendar_ids = {
-            "polimentos": os.getenv("CAL_POLIMENTOS_ID"),
-            "higienizacao": os.getenv("CAL_HIGIENIZACAO_ID"),
-            "lavagens": os.getenv("CAL_LAVAGENS_ID"),
-            "peliculas": os.getenv("CAL_PELICULAS_ID"),
-            "instalacoes": os.getenv("CAL_INSTALACOES_ID"),
-            "martelinho": os.getenv("CAL_MARTELINHO_ID"),
-            "role_guarulhos": os.getenv("CAL_ROLE_GUARULHOS_ID"),
-        }
+        # ID único do calendário
+        calendar_id = (
+            os.getenv("GOOGLE_CALENDAR_ID")
+            or os.getenv("CAL_DEFAULT_ID")
+            or os.getenv("CAL_POLIMENTOS_ID")
+        )
+        if not calendar_id:
+            raise RuntimeError(
+                "Defina GOOGLE_CALENDAR_ID (ou CAL_DEFAULT_ID) com o ID do calendário do Google."
+            )
 
         return cls(
             openai_api_key=openai_api_key,
-            openai_assistant_id=openai_assistant_id,
+            openai_chat_assistant_id=openai_chat_assistant_id,
+            openai_agenda_assistant_id=openai_agenda_assistant_id,
             timezone=timezone,
-            google_service_account_info=info,
-            calendar_ids=calendar_ids,
+            google_service_account_info=google_service_account_info,
+            google_calendar_id=calendar_id,
         )
 
 
