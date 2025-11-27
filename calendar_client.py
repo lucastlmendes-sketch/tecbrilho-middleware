@@ -12,58 +12,75 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _get_service():
+    """Create a Google Calendar API service client using a single calendar.
+
+    We use the service account JSON stored in settings.google_service_account_info.
+    """
     creds = service_account.Credentials.from_service_account_info(
-        settings.google_service_account_info,
-        scopes=SCOPES,
+        settings.google_service_account_info, scopes=SCOPES
     )
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    service = build("calendar", "v3", credentials=creds)
+    return service
 
 
-def _pick_calendar_id(service_type: str) -> str:
-    key = service_type.lower().strip()
-    cal_id = settings.calendar_ids.get(key)
-    if not cal_id:
-        raise ValueError(f"Calendário não configurado: {service_type}")
-    return cal_id
+def create_calendar_event(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Create an event in the single TecBrilho Google Calendar.
 
-
-def create_calendar_event_tool(args: Dict[str, Any]) -> Dict[str, Any]:
+    Expected keys in `data` (after processing by the OpenAI assistant Erika Agenda):
+        - nome: str
+        - telefone: str
+        - carro: str
+        - servicos: str
+        - categoria: str (optional, used only for description/log)
+        - inicio: str (ISO 8601 with timezone)
+        - fim: str (ISO 8601 with timezone)
+        - descricao: str
     """
-    Recebe o formato convertido pelo openai_client:
-    {
-      service_type,
-      title,
-      start_iso,
-      end_iso,
-      description,
-      ...
-    }
-    """
-
-    service_type = args.get("service_type", "polimentos")
-    title = args.get("title")
-    description = args.get("description")
-    start_iso = args.get("start_iso")
-    end_iso = args.get("end_iso")
-
-    if not all([title, start_iso, end_iso]):
-        raise ValueError("start_iso, end_iso e title são obrigatórios.")
-
-    cal_id = _pick_calendar_id(service_type)
     service = _get_service()
+    calendar_id = settings.google_calendar_id
+
+    start_iso = data.get("inicio")
+    end_iso = data.get("fim")
+
+    if not start_iso or not end_iso:
+        raise ValueError("Campos 'inicio' e 'fim' são obrigatórios para criar o evento.")
+
+    summary = data.get("servicos") or "Atendimento TecBrilho"
+    nome = data.get("nome") or ""
+    if nome:
+        summary = f"{summary} – {nome}"
+
+    description = data.get("descricao") or ""
+    telefone = data.get("telefone") or ""
+    carro = data.get("carro") or ""
+    categoria = data.get("categoria") or ""
+
+    extra_lines = []
+    if telefone:
+        extra_lines.append(f"Telefone: {telefone}")
+    if carro:
+        extra_lines.append(f"Veículo: {carro}")
+    if categoria:
+        extra_lines.append(f"Categoria: {categoria}")
+
+    if extra_lines:
+        description = description + "\n\n" + "\n".join(extra_lines)
 
     event_body = {
-        "summary": title,
-        "description": description or "",
-        "start": {"dateTime": start_iso, "timeZone": settings.timezone},
-        "end": {"dateTime": end_iso, "timeZone": settings.timezone},
-        "reminders": {"useDefault": True},
+        "summary": summary,
+        "description": description,
+        "start": {"dateTime": start_iso},
+        "end": {"dateTime": end_iso},
     }
 
-    event = service.events().insert(calendarId=cal_id, body=event_body).execute()
+    event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+
+    logger.info("Evento criado no calendário %s: %s", calendar_id, event.get("id"))
 
     return {
-        "calendar_id": cal_id,
+        "calendar_id": calendar_id,
         "event_id": event.get("id"),
         "html_link": event.get("htmlLink"),
+        "start": start_iso,
+        "end": end_iso,
     }
