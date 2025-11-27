@@ -1,129 +1,194 @@
 import json
 import logging
-from typing import Tuple
+import time
+from typing import Dict, Any, List
 
 from openai import OpenAI
 
 from config import settings
-from state_store import StateStore
 import calendar_client
-import botconversa_client
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIChatClient:
-    def __init__(self, state_store: StateStore):
+    """Wrapper around the OpenAI client to talk to assistants.
+
+    For this stage we only use the Erika Agenda assistant to create calendar events.
+    """
+
+    def __init__(self) -> None:
         self.client = OpenAI(api_key=settings.openai_api_key)
-        self.assistant_id = settings.openai_assistant_id
-        self.state_store = state_store
+        self.agenda_assistant_id = settings.openai_agenda_assistant_id
 
-    async def handle_message(self, contact_id: str, phone: str, message: str) -> Tuple[str, str]:
-        """Envia a mensagem do cliente para o Assistente e devolve a resposta.
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def run_agenda_assistant(self, payload: Dict[str, Any]) -> str:
+        """Use the Erika Agenda assistant to create a calendar event.
 
-        Usa contact_id como identificador único do cliente, para manter o
-        histórico da conversa.
+        `payload` is the JSON recebido do BotConversa:
+            {
+              "nome": "...",
+              "telefone": "...",
+              "carro": "...",
+              "servicos": "...",
+              "categoria": "...",
+              "data": "...",
+              "hora": "...",
+              "duracao": "...",
+              ...
+            }
         """
-        thread_id = self.state_store.get_thread_id(contact_id)
-        if not thread_id:
-            thread = self.client.beta.threads.create(
-                metadata={
-                    "contact_id": contact_id,
-                    "phone": phone,
+        # Normaliza os campos vindos do BotConversa
+        nome = (payload.get("nome") or "").strip()
+        telefone = (payload.get("telefone") or "").strip()
+        carro = (payload.get("carro") or "").strip()
+        servicos = (payload.get("servicos") or "").strip()
+        categoria = (payload.get("categoria") or "").strip()
+        data = (payload.get("data") or "").strip()
+        hora = (payload.get("hora") or "").strip()
+        duracao_raw = str(payload.get("duracao") or "").strip()
+        historico = (payload.get("historico") or "").strip()
+
+        try:
+            duracao_min = int(duracao_raw) if duracao_raw else None
+        except ValueError:
+            duracao_min = None
+
+        user_payload = {
+            "nome": nome,
+            "telefone": telefone,
+            "carro": carro,
+            "servicos": servicos,
+            "categoria": categoria,
+            "data": data,
+            "hora": hora,
+            "duracao_minutos": duracao_min,
+            "historico": historico,
+            "timezone": settings.timezone,
+        }
+
+        logger.info(
+            "[AGENDA] Chamando Erika Agenda com payload: %s",
+            json.dumps(user_payload, ensure_ascii=False),
+        )
+
+        thread = self.client.beta.threads.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Você é a Erika Agenda, responsável por transformar as intenções "
+                        "de agendamento em eventos reais no Google Agenda TecBrilho. "
+                        "Receba o JSON a seguir, valide dados, calcule horários de início/fim "
+                        f"no timezone {settings.timezone}, respeitando duração, e chame a ferramenta "
+                        "`create_calendar_event` exatamente uma vez para criar o evento. "
+                        "Depois responda com uma frase curta e clara em português confirmando "
+                        "o agendamento para o cliente. "
+                        "JSON do cliente:\n"
+                        f"{json.dumps(user_payload, ensure_ascii=False)}"
+                    ),
                 }
+            ]
+        )
+
+        run = self.client.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=self.agenda_assistant_id,
+        )
+
+        # Processa o run até terminar (tratando tool_calls)
+        final_run = self._process_run_with_tools(thread.id, run.id)
+
+        if final_run.status != "completed":
+            logger.error("[AGENDA] Run finalizou com status %s", final_run.status)
+            return (
+                "Tive um problema para confirmar seu agendamento agora. "
+                "Pode tentar novamente em alguns instantes?"
             )
-            thread_id = thread.id
-            self.state_store.set_thread_id(contact_id, thread_id)
 
-        # Cria a mensagem do usuário (texto bruto vindo do BotConversa)
-        self.client.beta.threads.messages.create(
-            thread_id=thread_id,
-            role="user",
-            content=message,
-        )
+        # Recupera a última mensagem do assistente
+        return self._get_last_assistant_message(thread.id)
 
-        # Cria um run e já faz o poll até terminar ou pedir ação
-        run = self.client.beta.threads.runs.create_and_poll(
-            thread_id=thread_id,
-            assistant_id=self.assistant_id,
-        )
+    # ------------------------------------------------------------------
+    # Tool processing internals
+    # ------------------------------------------------------------------
+    def _process_run_with_tools(self, thread_id: str, run_id: str):
+        """Poll the run until completion, handling tool calls when required."""
+        while True:
+            run = self.client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
 
-        # Se o Assistente precisar chamar ferramentas (agenda, tags, etc.)
-        while run.status == "requires_action":
-            tool_outputs = []
+            if run.status == "requires_action":
+                tool_outputs: List[Dict[str, str]] = []
+                ra = run.required_action
+                if ra and ra.type == "submit_tool_outputs":
+                    for tool_call in ra.submit_tool_outputs.tool_calls:
+                        fn_name = tool_call.function.name
+                        raw_args = tool_call.function.arguments or "{}"
+                        try:
+                            args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            args = {}
 
-            required = run.required_action
-            if not required or required.type != "submit_tool_outputs":
-                break
+                        logger.info("[AGENDA] Tool call: %s args=%s", fn_name, raw_args)
 
-            for tool_call in required.submit_tool_outputs.tool_calls:
-                function_name = tool_call.function.name
-                arguments = json.loads(tool_call.function.arguments or "{}")
+                        if fn_name == "create_calendar_event":
+                            try:
+                                result = calendar_client.create_calendar_event(args)
+                                output_str = json.dumps(result, ensure_ascii=False)
+                            except Exception as exc:
+                                logger.exception("Erro ao criar evento no calendário: %s", exc)
+                                output_str = json.dumps(
+                                    {
+                                        "error": "Erro ao criar evento no Google Agenda.",
+                                        "details": str(exc),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                        else:
+                            output_str = json.dumps(
+                                {"error": f"Função de ferramenta desconhecida: {fn_name}"},
+                                ensure_ascii=False,
+                            )
 
-                logger.info("Tool call recebido: %s(%s)", function_name, arguments)
+                        tool_outputs.append(
+                            {
+                                "tool_call_id": tool_call.id,
+                                "output": output_str,
+                            }
+                        )
 
-                if function_name == "create_calendar_event":
-                    # Compatibiliza strict mode (start_time/end_time) com o calendário interno
-                    args_conv = dict(arguments)
-                    if "start_time" in args_conv and "start_iso" not in args_conv:
-                        args_conv["start_iso"] = args_conv.pop("start_time")
-                    if "end_time" in args_conv and "end_iso" not in args_conv:
-                        args_conv["end_iso"] = args_conv.pop("end_time")
-
-                    try:
-                        result = calendar_client.create_calendar_event_tool(args_conv)
-                    except Exception as exc:
-                        logger.exception("Erro ao criar evento no calendário: %s", exc)
-                        result = {"error": str(exc)}
-
-                elif function_name == "tag_contact":
-                    # Garante que o contact_id sempre esteja presente
-                    arguments.setdefault("contact_id", contact_id)
-                    result = botconversa_client.tag_contact_tool(arguments)
-
-                elif function_name == "get_contact_context":
-                    # Busca nome, tags e campos extras do contato no BotConversa
-                    result = botconversa_client.get_contact_context_tool(arguments)
-
-                else:
-                    result = {
-                        "error": f"Função de ferramenta desconhecida: {function_name}"
-                    }
-
-                tool_outputs.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "output": json.dumps(result, ensure_ascii=False),
-                    }
+                self.client.beta.threads.runs.submit_tool_outputs(
+                    thread_id=thread_id,
+                    run_id=run.id,
+                    tool_outputs=tool_outputs,
                 )
+                time.sleep(0.5)
+                continue
 
-            run = self.client.beta.threads.runs.submit_tool_outputs_and_poll(
-                thread_id=thread_id,
-                run_id=run.id,
-                tool_outputs=tool_outputs,
-            )
+            if run.status in {"completed", "failed", "cancelled", "expired"}:
+                return run
 
-        # Agora esperamos que o run esteja finalizado
-        if run.status != "completed":
-            logger.warning("Run não completou com sucesso. Status: %s", run.status)
+            time.sleep(0.7)
 
-        # Busca a última mensagem do assistente neste thread
+    def _get_last_assistant_message(self, thread_id: str) -> str:
+        """Return the last assistant message text for the given thread."""
         messages = self.client.beta.threads.messages.list(
-            thread_id=thread_id,
-            order="desc",
-            limit=10,
+            thread_id=thread_id, order="desc", limit=10
         )
 
         for msg in messages.data:
             if msg.role == "assistant":
-                # Pega apenas o texto concatenado
-                parts = []
+                parts: List[str] = []
                 for c in msg.content:
-                    if c.type == "text":
+                    if getattr(c, "type", None) == "text":
                         parts.append(c.text.value)
                 if parts:
-                    answer = "\n".join(parts)
-                    return answer, thread_id
+                    return "\n".join(parts)
 
-        # Se por algum motivo não encontrarmos mensagem do assistente
-        raise RuntimeError("Nenhuma resposta do assistente encontrada no thread")
+        logger.warning("Nenhuma mensagem de assistente encontrada no thread %s", thread_id)
+        return (
+            "Seu agendamento foi processado, mas não consegui gerar a mensagem de confirmação "
+            "automática. Se tiver alguma dúvida, fale com a equipe TecBrilho."
+        )
