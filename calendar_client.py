@@ -1,86 +1,83 @@
-import logging
-from typing import Dict, Any
+# calendar_client.py
+"""
+Google Calendar Client
+----------------------
+Responsável por criar eventos no Google Calendar usando um
+Service Account.
 
+Mesmo que o Assistente OpenAI Agenda possa criar eventos diretamente,
+mantemos esta classe para compatibilidade futura e para suportar
+function calling, caso seja habilitado mais tarde.
+"""
+
+from __future__ import annotations
+
+import datetime
+import pytz
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-
 from config import settings
 
-logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+class GoogleCalendarClient:
+    """Cliente responsável por criar eventos no Google Calendar."""
+
+    def __init__(self):
+        creds = service_account.Credentials.from_service_account_info(
+            settings.google_service_account_info,
+            scopes=["https://www.googleapis.com/auth/calendar"]
+        )
+        self.service = build("calendar", "v3", credentials=creds)
+        self.calendar_id = settings.google_calendar_id
+        self.tz = pytz.timezone(settings.timezone)
+
+    # ----------------------------------------------------------
+    # Criação de evento no Google Calendar
+    # ----------------------------------------------------------
+    def create_event(
+        self,
+        title: str,
+        start_time: str,
+        end_time: str,
+        description: str = "",
+        location: str = "",
+    ) -> dict:
+        """
+        Cria um evento no calendário Google.
+
+        Params:
+            title (str)       – Título do evento
+            start_time (str)  – Horário inicial (ISO 8601)
+            end_time (str)    – Horário final   (ISO 8601)
+            description (str) – Descrição do evento
+            location (str)    – Local (opcional)
+
+        Returns:
+            dict contendo o evento criado.
+        """
+
+        event_body = {
+            "summary": title,
+            "description": description,
+            "location": location,
+            "start": {
+                "dateTime": start_time,
+                "timeZone": settings.timezone,
+            },
+            "end": {
+                "dateTime": end_time,
+                "timeZone": settings.timezone,
+            }
+        }
+
+        event = (
+            self.service.events()
+            .insert(calendarId=self.calendar_id, body=event_body)
+            .execute()
+        )
+
+        return event
 
 
-def _get_service():
-    """Create a Google Calendar API service client using a single calendar.
-
-    We use the service account JSON stored in settings.google_service_account_info.
-    """
-    creds = service_account.Credentials.from_service_account_info(
-        settings.google_service_account_info, scopes=SCOPES
-    )
-    service = build("calendar", "v3", credentials=creds)
-    return service
-
-
-def create_calendar_event(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Create an event in the single TecBrilho Google Calendar.
-
-    Expected keys in `data` (after processing by the OpenAI assistant Erika Agenda):
-        - nome: str
-        - telefone: str
-        - carro: str
-        - servicos: str
-        - categoria: str (optional, used only for description/log)
-        - inicio: str (ISO 8601 with timezone)
-        - fim: str (ISO 8601 with timezone)
-        - descricao: str
-    """
-    service = _get_service()
-    calendar_id = settings.google_calendar_id
-
-    start_iso = data.get("inicio")
-    end_iso = data.get("fim")
-
-    if not start_iso or not end_iso:
-        raise ValueError("Campos 'inicio' e 'fim' são obrigatórios para criar o evento.")
-
-    summary = data.get("servicos") or "Atendimento TecBrilho"
-    nome = data.get("nome") or ""
-    if nome:
-        summary = f"{summary} – {nome}"
-
-    description = data.get("descricao") or ""
-    telefone = data.get("telefone") or ""
-    carro = data.get("carro") or ""
-    categoria = data.get("categoria") or ""
-
-    extra_lines = []
-    if telefone:
-        extra_lines.append(f"Telefone: {telefone}")
-    if carro:
-        extra_lines.append(f"Veículo: {carro}")
-    if categoria:
-        extra_lines.append(f"Categoria: {categoria}")
-
-    if extra_lines:
-        description = description + "\n\n" + "\n".join(extra_lines)
-
-    event_body = {
-        "summary": summary,
-        "description": description,
-        "start": {"dateTime": start_iso},
-        "end": {"dateTime": end_iso},
-    }
-
-    event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-
-    logger.info("Evento criado no calendário %s: %s", calendar_id, event.get("id"))
-
-    return {
-        "calendar_id": calendar_id,
-        "event_id": event.get("id"),
-        "html_link": event.get("htmlLink"),
-        "start": start_iso,
-        "end": end_iso,
-    }
+# Instância única exportada
+calendar_client = GoogleCalendarClient()
