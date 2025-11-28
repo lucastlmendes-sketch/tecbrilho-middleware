@@ -1,22 +1,28 @@
-# TecBrilho – Middleware de Agendamentos  
-Integração entre BotConversa → Assistente OpenAI (Erika Agenda) → Google Calendar
+# 🚀 TecBrilho Middleware – Integração BotConversa + OpenAI + Google Calendar
 
-Este middleware recebe dados do BotConversa via Webhook,
-envia ao Assistente Erika Agenda (OpenAI) e retorna uma mensagem de
-confirmação já formatada para o cliente.
+Este middleware conecta:
 
-O Assistente Agenda realiza:
-- validação de horários  
-- validação de capacidade  
-- conversão de datas/horas  
-- cálculo de duração  
-- criação do evento no Google Calendar  
-- geração da mensagem final  
-- tudo internamente (Arquitetura A)
+- **BotConversa** (via Webhook)  
+- **Assistente Erika Agenda (OpenAI Assistants v2)**  
+- **Google Calendar**  
+- **FastAPI (Render)**  
 
-O backend só envia dados e devolve a resposta.
+Foi desenvolvido na **Arquitetura A — O Assistente Agenda faz TUDO**.
+
+Ou seja:
+
+✅ O BotConversa envia os dados via webhook  
+✅ O middleware envia para o Assistente da OpenAI  
+✅ O Assistente Agenda:
+- valida horários  
+- cria o evento no Google Calendar  
+- monta mensagem final para o cliente  
+
+✅ O middleware apenas retorna essa mensagem ao BotConversa  
+
+Simples, escalável e extremamente estável.
 
 ---
 
-## 📌 Arquitetura Final
+# 📦 Estrutura dos Arquivos
 
