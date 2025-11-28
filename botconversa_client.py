@@ -1,103 +1,60 @@
 # botconversa_client.py
 """
-BotConversa Client
-------------------
-Cliente simples para interagir com a API do BotConversa.
+BotConversa Client (Versão A)
+-----------------------------
+Como a arquitetura atual usa APENAS o webhook para comunicação,
+este módulo é mantido apenas para compatibilidade e uso futuro.
 
-Ele permite:
- - enviar mensagens para um contato
- - adicionar tags
- - atualizar campos personalizados
+Neste cenário:
+- O BotConversa envia dados para o middleware.
+- O middleware retorna a estrutura { "send": [...] }.
+- Não existe comunicação ativa do middleware -> BotConversa.
 
-Este arquivo é opcional, mas útil caso futuramente o middleware
-precise interagir diretamente com o BotConversa.
+Ainda assim, deixamos esta classe estruturada para expansões.
 """
 
-import os
-import httpx
 import logging
 
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BotConversaClient")
 
 
 class BotConversaClient:
+    """
+    Classe utilitária opcional para uma futura expansão,
+    caso você deseje enviar mensagens ativamente ao BotConversa
+    usando a API oficial deles.
+
+    Na Arquitetura A, esta classe NÃO é usada.
+    """
+
     def __init__(self):
-        self.api_key = os.getenv("BOTCONVERSA_API_KEY")
-        self.base_url = "https://backend.botconversa.com.br/api/v1"
+        logger.info("BotConversaClient inicializado (modo passivo).")
 
-        if not self.api_key:
-            logger.warning("[BotConversa] BOTCONVERSA_API_KEY não encontrada.")
-
-    # -------------------------------------------------------------
-    # ENVIA MENSAGEM PARA UM CONTATO
-    # -------------------------------------------------------------
-    async def send_message(self, contact_id: str, text: str) -> bool:
-        if not self.api_key:
-            return False
-
-        url = f"{self.base_url}/messages/send/"
-        headers = {"Authorization": f"Token {self.api_key}"}
-
-        payload = {
-            "phone": contact_id,
-            "message": text,
+    def send_message(self, contact_id: str, text: str):
+        """
+        Método de placeholder — não implementado.
+        """
+        logger.warning(
+            "send_message() foi chamado, mas não há API configurada. "
+            "O BotConversa é acionado apenas via webhook."
+        )
+        return {
+            "status": "inactive",
+            "detail": "Envio direto ao BotConversa não configurado nesta arquitetura."
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
-                    return True
-                logger.error(
-                    "[BotConversa] Erro ao enviar mensagem: %s",
-                    resp.text
-                )
-        except Exception as exc:
-            logger.exception("[BotConversa] Falha ao enviar mensagem: %s", exc)
-
-        return False
-
-    # -------------------------------------------------------------
-    # APLICAR TAG EM UM CONTATO
-    # -------------------------------------------------------------
-    async def add_tag(self, contact_id: str, tag: str) -> bool:
-        if not self.api_key:
-            return False
-
-        url = f"{self.base_url}/contacts/{contact_id}/tags/"
-        headers = {"Authorization": f"Token {self.api_key}"}
-        payload = {"tag": tag}
-
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                return resp.status_code == 200
-        except Exception as exc:
-            logger.exception("[BotConversa] Falha ao adicionar tag: %s", exc)
-
-        return False
-
-    # -------------------------------------------------------------
-    # ATUALIZAR CAMPOS PERSONALIZADOS
-    # -------------------------------------------------------------
-    async def update_custom_fields(self, contact_id: str, fields: dict) -> bool:
-        if not self.api_key:
-            return False
-
-        url = f"{self.base_url}/contacts/{contact_id}/update/"
-        headers = {"Authorization": f"Token {self.api_key}"}
-        payload = {"custom_fields": fields}
-
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.patch(url, headers=headers, json=payload)
-                return resp.status_code == 200
-        except Exception as exc:
-            logger.exception("[BotConversa] Erro ao atualizar campos personalizados: %s", exc)
-
-        return False
+    def info(self):
+        """
+        Retorna apenas informações de estado.
+        """
+        return {
+            "mode": "webhook_only",
+            "description": (
+                "O BotConversa envia eventos via webhook. "
+                "O middleware não envia mensagens ativamente."
+            ),
+        }
 
 
-# Instância padrão exportada
+# Instância global — mantém compatibilidade com importações
 botconversa_client = BotConversaClient()
