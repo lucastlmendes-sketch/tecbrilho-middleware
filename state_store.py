@@ -1,68 +1,55 @@
 # state_store.py
 """
-State Store
------------
-Armazena dados simples de forma persistente (opcional) usando um arquivo JSON.
+State Store (Versão A - simples e opcional)
+-------------------------------------------
+Na Arquitetura A, o assistente OpenAI (Erika Agenda)
+é 100% responsável por controlar lógica, memória de curto prazo
+e criação de eventos.
 
-Esse recurso serve como utilitário de debug ou para manter rastreamento
-mínimo de threads utilizadas nos agendamentos.
+O backend permanece totalmente "stateless".
 
-Ele não é crítico para o funcionamento do middleware,
-mas auxilia no monitoramento e auditoria caso necessário.
+Este módulo existe apenas para expansões futuras.
 """
 
-import json
-import os
 import logging
 
-logger = logging.getLogger(__name__)
-
-STATE_FILE = "state_store.json"
+logger = logging.getLogger("StateStore")
 
 
 class StateStore:
+    """
+    Armazena estados mínimos em memória (runtime).
+    Não persiste nada — seguro para uso em Render.
+    """
+
     def __init__(self):
-        # Se o arquivo não existir, cria com estrutura básica
-        if not os.path.exists(STATE_FILE):
-            self._write({"threads": {}})
-        logger.info("[StateStore] Inicializado.")
+        self._store = {}
+        logger.info("StateStore inicializado (modo leve).")
 
-    # -----------------------------------------------------------
-    # LEITURA DE DADOS
-    # -----------------------------------------------------------
-    def _read(self) -> dict:
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as exc:
-            logger.exception("[StateStore] Erro ao ler state_store.json: %s", exc)
-            return {"threads": {}}
+    # ---------------------------------------------------
+    # MÉTODOS BÁSICOS
+    # ---------------------------------------------------
 
-    # -----------------------------------------------------------
-    # ESCRITA DE DADOS
-    # -----------------------------------------------------------
-    def _write(self, data: dict):
-        try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            logger.exception("[StateStore] Erro ao salvar state_store.json: %s", exc)
+    def set(self, key: str, value):
+        """Grava um valor na memória volátil."""
+        self._store[key] = value
+        logger.debug(f"[STATE] SET {key} = {value}")
 
-    # -----------------------------------------------------------
-    # REGISTRAR THREAD DO OPENAI
-    # -----------------------------------------------------------
-    def save_thread(self, contact_id: str, thread_id: str):
-        data = self._read()
-        data["threads"][contact_id] = thread_id
-        self._write(data)
+    def get(self, key: str, default=None):
+        """Lê um valor do estado."""
+        return self._store.get(key, default)
 
-    # -----------------------------------------------------------
-    # BUSCAR THREAD ANTERIOR
-    # -----------------------------------------------------------
-    def get_thread(self, contact_id: str) -> str | None:
-        data = self._read()
-        return data["threads"].get(contact_id)
+    def delete(self, key: str):
+        """Remove um item específico."""
+        if key in self._store:
+            del self._store[key]
+            logger.debug(f"[STATE] DEL {key}")
+
+    def clear(self):
+        """Limpa todo o estado."""
+        self._store.clear()
+        logger.debug("[STATE] CLEAR")
 
 
-# Instância exportada
+# Instância global — mantém compatibilidade com importações externas
 state_store = StateStore()
