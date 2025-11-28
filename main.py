@@ -1,39 +1,35 @@
 # main.py
 """
-TecBrilho Middleware - Arquitetura A (Assistente Agenda faz tudo)
------------------------------------------------------------------
+TecBrilho Middleware - Arquitetura A
+-----------------------------------
 Fluxo:
-  BotConversa -> /agenda-webhook -> Assistente Agenda (OpenAI) -> Google Calendar -> Mensagem final
+  BotConversa -> /agenda-webhook -> Assistente Agenda (OpenAI) -> Confirmação
 """
 
-import logging
 import os
-from fastapi import FastAPI, HTTPException
+import json
+import logging
+from typing import Dict, Any
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any
 
 from config import settings
 from openai_client import openai_client
 
-
-# ------------------------------------------------------
+# ---------------------------------------
 # LOGGING
-# ------------------------------------------------------
+# ---------------------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("TecBrilhoMiddleware")
+logger = logging.getLogger(__name__)
 
-
-# ------------------------------------------------------
+# ---------------------------------------
 # APP FASTAPI
-# ------------------------------------------------------
-app = FastAPI(
-    title="TecBrilho Middleware",
-    version="2.0.0",
-    description="Middleware oficial TecBrilho — BotConversa + OpenAI + Google Calendar"
-)
+# ---------------------------------------
+app = FastAPI(title="TecBrilho Middleware", version="2.0.0")
 
-# CORS liberado (obrigatório para BotConversa)
+# CORS liberado (seguro e necessário para BotConversa)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,9 +39,9 @@ app.add_middleware(
 )
 
 
-# ------------------------------------------------------
-# MODELO DE PAYLOAD DO BOTCONVERSA
-# ------------------------------------------------------
+# ---------------------------------------
+# Modelo do payload enviado pelo BotConversa
+# ---------------------------------------
 class AgendaPayload(BaseModel):
     data: str
     hora: str
@@ -58,77 +54,74 @@ class AgendaPayload(BaseModel):
     historico: str
 
 
-# ------------------------------------------------------
-# HEALTHCHECK (Render usa para saber se app está vivo)
-# ------------------------------------------------------
-@app.get("/")
+# ---------------------------------------
+# Healthcheck (GET + HEAD)
+# ---------------------------------------
+@app.api_route("/", methods=["GET", "HEAD"])
 async def health() -> Dict[str, Any]:
+    """
+    Healthcheck compatível com Render (aceita GET e HEAD).
+    """
     return {
         "status": "ok",
         "version": app.version,
-        "calendar_id": settings.google_calendar_id,
         "timezone": settings.timezone,
-        "assistant_agenda": settings.openai_agenda_assistant_id
     }
 
 
-# ------------------------------------------------------
-# ROTA PRINCIPAL - WEBHOOK DO BOTCONVERSA
-# ------------------------------------------------------
+# ---------------------------------------
+# ROTA PRINCIPAL - WEBHOOK
+# ---------------------------------------
 @app.post("/agenda-webhook")
 async def agenda_webhook(payload: AgendaPayload):
     """
     Webhook chamado pelo BotConversa.
-    Aqui enviamos os dados para o Assistente Erika Agenda (OpenAI),
-    que cria o evento no Google Calendar e devolve a mensagem final.
+    Envia os dados ao Assistente Erika Agenda e retorna
+    mensagem pronta para o cliente.
     """
 
-    logger.info("📩 [WEBHOOK] Payload recebido:")
-    logger.info(payload.model_dump())
+    logger.info("[WEBHOOK] Dados recebidos: %s", payload.json(ensure_ascii=False))
 
-    # Construir prompt para o assistente
+    # ---------------------------------------
+    # Montar prompt para o Assistente Agenda
+    # ---------------------------------------
     prompt = f"""
-    Você é a assistente Erika Agenda.
-    Sua tarefa é AGENDAR o serviço solicitado no Google Calendar.
+    Faça o agendamento no Google Agenda com as seguintes informações:
 
-    Dados completos do cliente:
-
-    • Nome: {payload.nome}
+    • Nome do cliente: {payload.nome}
     • Telefone: {payload.telefone}
-    • Carro: {payload.carro}
-    • Serviço(s): {payload.servicos}
+    • Modelo do veículo: {payload.carro}
+    • Serviço escolhido: {payload.servicos}
     • Categoria: {payload.categoria}
-
-    Agendamento solicitado:
-    • Data: {payload.data}
-    • Horário: {payload.hora}
-    • Duração (min): {payload.duracao}
+    • Data desejada: {payload.data}
+    • Horário desejado: {payload.hora}
+    • Duração (minutos): {payload.duracao}
 
     Histórico da conversa:
     {payload.historico}
 
-    Tarefas obrigatórias:
-    1. Validar o horário no Google Calendar.
-    2. Criar o evento no ID:
-       {settings.google_calendar_id}
-    3. Gerar uma mensagem final, educada e curta, confirmando o agendamento.
+    Instruções:
+    - Valide disponibilidade automaticamente.
+    - Crie o evento no calendário configurado.
+    - Gere uma mensagem curta, amigável e profissional confirmando o agendamento.
     """
 
-    # CHAMAR ASSISTENTE E PROCESSAR
+    # ---------------------------------------
+    # Processar no Assistente Agenda
+    # ---------------------------------------
     try:
         mensagem_final = openai_client.process_agendamento(prompt)
     except Exception as exc:
-        logger.exception("❌ Erro ao processar agendamento:")
-        raise HTTPException(
-            status_code=500,
-            detail="Erro interno ao processar agendamento."
-        ) from exc
+        logger.exception("Erro ao processar Assistente Agenda: %s", exc)
+        mensagem_final = (
+            "Tive um problema para confirmar seu agendamento agora. "
+            "Pode tentar novamente em alguns instantes ou falar com a equipe TecBrilho."
+        )
 
-    logger.info("📤 [WEBHOOK] Mensagem retornada ao BotConversa:")
-    logger.info(mensagem_final)
-
-    # Resposta que o BotConversa espera
-    return {
+    # ---------------------------------------
+    # Resposta no formato do BotConversa
+    # ---------------------------------------
+    resposta = {
         "send": [
             {
                 "type": "text",
@@ -137,10 +130,14 @@ async def agenda_webhook(payload: AgendaPayload):
         ]
     }
 
+    logger.info("[WEBHOOK] Resposta enviada ao BotConversa: %s", mensagem_final)
 
-# ------------------------------------------------------
-# EXECUTAR LOCALMENTE
-# ------------------------------------------------------
+    return resposta
+
+
+# ---------------------------------------
+# Executar localmente (opcional)
+# ---------------------------------------
 if __name__ == "__main__":
     import uvicorn
 
