@@ -1,93 +1,83 @@
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+from openai import OpenAI
+from calendar_client import GoogleCalendarClient
 import os
-import json
-import logging
-from typing import Dict, Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
+app = FastAPI()
 
-from config import settings
-from openai_client import OpenAIChatClient
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+calendar_client = GoogleCalendarClient()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+OPENAI_AGENDA_ASSISTANT_ID = os.getenv("OPENAI_AGENDA_ASSISTANT_ID")
 
-app = FastAPI(title="TecBrilho Middleware", version="2.0.0")
-
-# CORS (não é estritamente necessário para o BotConversa, mas não atrapalha)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-openai_client = OpenAIChatClient()
+# --------------------------
+# MODELO DE PAYLOAD DO BOTCONVERSA
+# --------------------------
+class AgendaPayload(BaseModel):
+    data: str
+    hora: str
+    nome: str
+    carro: str
+    duracao: str
+    servicos: str
+    telefone: str
+    categoria: str
+    historico: str
 
 
-@app.get("/")
-async def healthcheck() -> Dict[str, Any]:
-    """Endpoint simples para checar se a API está de pé."""
-    return {
-        "status": "ok",
-        "version": app.version,
-        "timezone": settings.timezone,
-    }
-
-
+# --------------------------
+# ROTA DO WEBHOOK
+# --------------------------
 @app.post("/agenda-webhook")
-async def agenda_webhook(request: Request) -> Dict[str, Any]:
-    """Endpoint chamado pelo BotConversa para criar um agendamento.
+async def agenda_webhook(payload: AgendaPayload):
 
-    Espera um JSON no formato:
+    # 1. Criar nova thread para enviar ao Assistente de Agenda
+    thread = client.beta.threads.create()
 
-        {
-          "nome": "...",
-          "telefone": "...",
-          "carro": "...",
-          "servicos": "...",
-          "categoria": "...",
-          "data": "...",
-          "hora": "...",
-          "duracao": "...",
-          "contact_id": "...",
-          "historico": "..."
-        }
-    """
-    try:
-        body = await request.json()
-    except Exception as exc:
-        logger.exception("Falha ao ler JSON do webhook: %s", exc)
-        raise HTTPException(status_code=400, detail="Corpo da requisição não é um JSON válido.")
+    # 2. Enviar mensagem ao assistente Agenda
+    client.beta.threads.messages.create(
+        thread_id=thread.id,
+        role="user",
+        content=f"""
+        Faça o agendamento no Google Agenda com os seguintes dados:
 
-    logger.info(
-        "[WEBHOOK] Payload recebido do BotConversa: %s",
-        json.dumps(body, ensure_ascii=False),
+        • Nome: {payload.nome}
+        • Telefone: {payload.telefone}
+        • Carro: {payload.carro}
+        • Serviço: {payload.servicos}
+        • Categoria do serviço: {payload.categoria}
+        • Data: {payload.data}
+        • Horário: {payload.hora}
+        • Duração (minutos): {payload.duracao}
+        • Histórico: {payload.historico}
+
+        Gere uma mensagem curta de confirmação para enviar ao cliente.
+        """
     )
 
-    try:
-        mensagem_confirmacao = openai_client.run_agenda_assistant(body)
-    except Exception as exc:
-        logger.exception("Erro ao processar agendamento via Erika Agenda: %s", exc)
-        mensagem_confirmacao = (
-            "Tive um problema para confirmar seu agendamento agora. "
-            "Pode tentar novamente em alguns instantes ou falar com a equipe TecBrilho."
+    # 3. Rodar o assistente
+    run = client.beta.threads.runs.create(
+        thread_id=thread.id,
+        assistant_id=OPENAI_AGENDA_ASSISTANT_ID
+    )
+
+    # 4. Esperar terminar
+    from time import sleep
+    while True:
+        check = client.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id
         )
+        if check.status == "completed":
+            break
+        sleep(1)
 
-    # Resposta no formato esperado pelo BotConversa
+    # 5. Buscar resposta
+    messages = client.beta.threads.messages.list(thread_id=thread.id)
+    resposta = messages.data[0].content[0].text.value
+
     return {
-        "send": [
-            {
-                "type": "text",
-                "value": mensagem_confirmacao,
-            }
-        ]
+        "ok": True,
+        "msg": resposta
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
