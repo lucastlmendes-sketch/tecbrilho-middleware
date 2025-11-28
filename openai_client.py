@@ -1,72 +1,87 @@
 # openai_client.py
 """
-OpenAI Client
--------------
-Responsável pela comunicação com o Assistente Erika Agenda.
-
-Fluxo:
-    1. Criar thread
-    2. Enviar mensagem com dados do agendamento
-    3. Rodar assistente
-    4. Esperar finalizar
-    5. Capturar resposta final
-
-Este client é usado pelo webhook /agenda-webhook no main.py.
+OpenAI Client — Versão A (Assistente Erika Agenda faz tudo)
+------------------------------------------------------------
+Este módulo encapsula toda a comunicação com o Assistente da OpenAI.
+Ele cria threads, envia prompts e retorna a resposta final.
 """
 
 import time
+import logging
 from openai import OpenAI
 from config import settings
 
+logger = logging.getLogger("OpenAIClient")
 
-class OpenAIChatClient:
-    """Cliente responsável por conversar com o Assistente Erika Agenda."""
+
+# -------------------------------------------------------------
+# Cliente oficial da OpenAI (v2)
+# -------------------------------------------------------------
+client = OpenAI(api_key=settings.openai_api_key)
+
+
+class OpenAIClient:
+    """
+    Classe responsável por interagir com o Assistente Agenda (Erika Agenda)
+    para criar eventos e gerar a resposta final.
+    """
 
     def __init__(self):
-        self.client = OpenAI(api_key=settings.openai_api_key)
         self.assistant_id = settings.openai_agenda_assistant_id
 
     # ---------------------------------------------------------
-    # Processa um agendamento usando o Assistente Agenda
+    # Função principal usada pelo middleware
     # ---------------------------------------------------------
     def process_agendamento(self, prompt: str) -> str:
         """
-        Envia o prompt completo ao Assistente Agenda
-        e retorna a mensagem final produzida pelo assistente.
+        Envia instruções ao Assistente Erika Agenda e retorna a mensagem final.
         """
 
-        # 1. Criar nova thread
-        thread = self.client.beta.threads.create()
+        logger.info("📡 Enviando prompt ao Assistente Agenda...")
 
-        # 2. Enviar a mensagem do usuário
-        self.client.beta.threads.messages.create(
+        # Criar thread
+        thread = client.beta.threads.create()
+
+        # Enviar mensagem de usuário
+        client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
             content=prompt,
         )
 
-        # 3. Rodar o assistente
-        run = self.client.beta.threads.runs.create(
+        # Criar execução (RUN)
+        run = client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=self.assistant_id,
         )
 
-        # 4. Esperar conclusão
+        # Aguardar conclusão do assistente
         while True:
-            status = self.client.beta.threads.runs.retrieve(
+            status = client.beta.threads.runs.retrieve(
                 thread_id=thread.id,
                 run_id=run.id,
             )
+
             if status.status == "completed":
                 break
+
+            if status.status == "failed":
+                raise RuntimeError("Assistente Agenda falhou ao processar o agendamento.")
+
             time.sleep(1)
 
-        # 5. Buscar última resposta
-        messages = self.client.beta.threads.messages.list(thread_id=thread.id)
-        resposta = messages.data[0].content[0].text.value
+        # Coletar resposta final
+        messages = client.beta.threads.messages.list(thread_id=thread.id)
 
-        return resposta
+        for msg in messages.data:
+            if msg.role == "assistant":
+                texto = msg.content[0].text.value.strip()
+                logger.info("📝 Resposta recebida do assistente: %s", texto)
+                return texto
+
+        # Caso nada seja encontrado
+        raise RuntimeError("Nenhuma resposta válida do Assistente Agenda.")
 
 
-# Instância exportada
-openai_client = OpenAIChatClient()
+# Instância global para uso no middleware
+openai_client = OpenAIClient()
